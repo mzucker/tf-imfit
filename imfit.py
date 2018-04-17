@@ -60,6 +60,10 @@ def get_options():
                         help='maximum # of iterations for final fit',
                         default=100)
 
+    parser.add_argument('-R', '--rstdev', type=float, metavar='R',
+                        help='amount to randomize models when re-fitting',
+                        default=0.001)
+
     parser.add_argument('-s', '--max-size', type=int, metavar='N',
                         help='maximum size of image to load',
                         default=32)
@@ -76,10 +80,6 @@ def get_options():
     parser.add_argument('-o', '--output', type=argparse.FileType('w'),
                         metavar='PARAMFILE.txt',
                         help='write input params to file')
-
-    parser.add_argument('-R', '--replace-iter', type=int,
-                        metavar='N',
-                        help='maximum # of iterations for replacement')
 
     parser.add_argument('-l', '--lambda-err', type=float,
                         metavar='L',
@@ -368,6 +368,18 @@ def snapshot(cur_approx, input_image,
 
 ######################################################################
 
+def randomize(params, rstdev):
+
+    gmin = GABOR_RANGE[:,0]
+    gmax = GABOR_RANGE[:,1]
+    grng = gmax - gmin
+
+    bump = np.random.normal(scale=rstdev, size=params.shape)
+    
+    return params + bump*grng[None,:]
+
+######################################################################
+
 def main():
     
     opts = get_options()
@@ -459,7 +471,8 @@ def main():
                 print('performing joint optimization!')
                 print('  previous best loss was {}'.format(prev_best_loss))
 
-                g_joint.params.load(all_params[None,:,:], sess)
+                rparams = randomize(all_params, opts.rstdev)
+                g_joint.params.load(rparams[None,:,:], sess)
                 
                 cur_error = input_image
                 feed_dict = {cur_error_tensor: cur_error}
@@ -531,7 +544,8 @@ def main():
                     pvalues[:, :, :2] = sample_uvs
 
                 if is_replace:
-                    pvalues[0, :, :] = all_params[models]
+                    pvalues[0, :, :] = randomize(all_params[models],
+                                                 opts.rstdev)
                 
                 g_big.params.load(pvalues, sess)
 
