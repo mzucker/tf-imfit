@@ -2,3 +2,5 @@
 *~
 build/*
 *.pyc
+out*.png
+
