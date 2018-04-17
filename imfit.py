@@ -9,6 +9,8 @@ from PIL import Image
 # TODO: separate constraint loss from approximation loss
 # and don't compare sums of both iteration-to-iteration
 
+# TODO: load/save parameter sets
+
 ######################################################################
 
 GABOR_PARAM_U = 0 # [-1, 1]
