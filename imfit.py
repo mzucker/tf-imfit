@@ -6,9 +6,8 @@ import tensorflow as tf
 import numpy as np
 from PIL import Image
 
-# TODO: separate constraint loss from approximation loss
-# and don't compare sums of both iteration-to-iteration
-
+# TODO: replace multiple parameters at once
+# TODO: large-size preview
 # TODO: load/save parameter sets
 
 ######################################################################
@@ -51,7 +50,7 @@ def get_options():
 
     parser.add_argument('-f', '--num-fits', type=int, metavar='N',
                         help='number of random guesses per model',
-                        default=100)
+                        default=200)
 
     parser.add_argument('-m', '--max-iter', type=int, metavar='N',
                         help='maximum # of iterations per trial fit',
@@ -85,15 +84,18 @@ def get_options():
     parser.add_argument('-l', '--lambda-err', type=float,
                         metavar='L',
                         help='weight on multinomial sampling of error map',
-                        default=10.0)
+                        default=2.0)
     
     parser.add_argument('-J', '--joint-every', type=int, metavar='N',
                         help='perform joint optimization after every N models')
 
     parser.add_argument('-j', '--joint-iter', type=int, metavar='N',
                         help='maximum # of iterations for joint optimization',
-                        default=100)
+                        default=10000)
 
+    parser.add_argument('-S', '--single-snapshot', action='store_true',
+                        help='do not label snapshots with iter.')
+    
     args = parser.parse_args()
 
     if args.joint_every is None:
@@ -226,9 +228,11 @@ class GaborModel(object):
             self.diff = (cur_error_tensor - self.gabor) * weight
         
             diffsqr = 0.5*self.diff**2
+
+            self.e_losses = tf.reduce_mean(diffsqr, axis=(1,2))
+            self.c_losses = tf.reduce_mean(cviol, axis=1) 
         
-            self.losses = ( tf.reduce_mean(diffsqr, axis=(1,2)) +
-                            tf.reduce_mean(cviol, axis=1) )
+            self.losses = ( self.e_losses + self.c_losses )
 
             self.losses_argmin = tf.argmin(self.losses)
 
@@ -238,15 +242,19 @@ class GaborModel(object):
             self.loss = tf.reduce_mean(self.losses)
 
         else:
-
-            self.diff = (cur_error_tensor -
-                         tf.reduce_sum(self.gabor, axis=0)[None,:,:]) * weight
-
-            print('diff is', self.diff)
+            
+            self.gabor_sum = tf.reduce_sum(self.gabor, axis=0)
+            
+            self.diff = (cur_error_tensor - self.gabor_sum[None,:,:]) * weight
 
             diffsqr = 0.5*self.diff**2
 
-            self.loss = tf.reduce_mean(diffsqr) + tf.reduce_mean(cviol)
+            self.c_losses = tf.reduce_mean(cviol, axis=1)
+
+            self.e_loss = tf.reduce_mean(diffsqr)
+            self.c_loss = tf.reduce_sum(self.c_losses)
+
+            self.loss = self.e_loss + self.c_loss
 
         with tf.variable_scope('imfit_optimizer'):
             self.opt = tf.train.AdamOptimizer(learning_rate=learning_rate)
@@ -303,6 +311,30 @@ def rescale(idata, imin, imax):
 
     return img
 
+def snapshot(cur_approx, input_image, 
+             weight_image,
+             iteration, joint_iteration,
+             single_file):
+
+    if single_file:
+        outfile = 'out.png'
+    elif joint_iteration is None:
+        outfile = 'out{:04d}_single.png'.format(iteration+1)
+    else:
+        outfile = 'out{:04d}_{:06d}.png'.format(
+            iteration+1, joint_iteration+1)
+
+    cur_abserr = np.abs(cur_approx - input_image)
+    cur_abserr = cur_abserr * weight_image
+
+    out_img = np.hstack(( rescale(input_image, -1, 1),
+                          rescale(cur_approx, -1, 1),
+                          rescale(cur_abserr, 0, 1.0) ))
+
+    out_img = Image.fromarray(out_img, 'L')
+
+    out_img.save(outfile)
+
 ######################################################################
 
 def main():
@@ -310,10 +342,12 @@ def main():
     opts = get_options()
 
     input_image = open_grayscale(opts.image, opts.max_size)
-    weight_image = open_grayscale(opts.weights, opts.max_size)
 
-    if weight_image is not None:
+    if opts.weights is not None:
+        weight_image = open_grayscale(opts.weights, opts.max_size)
         assert weight_image.size == input_image.size
+    else:
+        weight_image = 1.0
 
     # move to -1, 1 range for input image
     input_image = input_image * 2 - 1
@@ -338,10 +372,7 @@ def main():
                                       shape=(1,) + input_image.shape,
                                       name='cur_error')
 
-    if weight_image is not None:
-        wimg = tf.constant(weight_image)
-    else:
-        wimg = 1.0
+    wimg = tf.constant(weight_image)
 
     with tf.variable_scope('small'):
         g_small = GaborModel(x, y, 1, wimg,
@@ -354,7 +385,6 @@ def main():
     with tf.variable_scope('joint'):
         g_joint = GaborModel(x, y, opts.num_models, wimg,
                              cur_error_tensor,
-                             learning_rate=1e-5,
                              initializer=tf.zeros_initializer())
         
     opt_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES,
@@ -365,9 +395,11 @@ def main():
 
     cur_approx = np.zeros_like(input_image)
     cur_error = input_image - cur_approx
+    cur_c_losses = 0.0
 
     all_params = np.zeros((opts.num_models, GABOR_NUM_PARAMS), dtype=np.float32)
     all_approx = np.zeros((opts.num_models,) + input_image.shape, dtype=np.float32)
+    all_c_loss = np.zeros(opts.num_models, dtype=np.float32)
 
     iteration = 0
 
@@ -391,7 +423,7 @@ def main():
                 (iteration - opts.num_models) % opts.joint_every == 0):
 
                 print('performing joint optimization!')
-                print('  loss was', prev_best_loss)
+                print('  previous best loss was {}'.format(prev_best_loss))
 
                 g_joint.params.load(all_params, sess)
                 
@@ -399,17 +431,37 @@ def main():
                 feed_dict = {cur_error_tensor: cur_error[None,:,:]}
 
                 fetches = dict(gabor=g_joint.gabor,
+                               gabor_sum=g_joint.gabor_sum,
                                params=g_joint.params,
                                loss=g_joint.loss,
-                               train_op=g_joint.train_op)
+                               train_op=g_joint.train_op,
+                               c_losses=g_joint.c_losses)
 
                 for i in range(opts.joint_iter):
+
                     results = sess.run(fetches, feed_dict)
+                    
+                    if ((i+1) % 1000 == 0 and (i+1) < opts.joint_iter):
+                        
+                        print('  loss at iter {:6d} is {}'.format(
+                            i+1, results['loss']))
 
-                print('  loss is ', results['loss'])
 
-                all_params = results['params']
-                all_approx = results['gabor']
+                        snapshot(results['gabor_sum'],
+                                 input_image, weight_image,
+                                 iteration, i, opts.single_snapshot)
+
+                print('  new final loss is now  {}'.format(results['loss']))
+
+                snapshot(results['gabor_sum'],
+                         input_image, weight_image,
+                         iteration, opts.joint_iter, opts.single_snapshot)
+                
+                if results['loss'] < prev_best_loss:
+                    all_params = results['params']
+                    all_approx = results['gabor']
+                    all_c_loss = results['c_losses']
+                    prev_best_loss = results['loss']
 
                 print()
 
@@ -418,6 +470,7 @@ def main():
                 idx = np.hstack((np.arange(0,model),
                                  np.arange(model+1,opts.num_models)))
                 cur_approx = all_approx[idx].sum(axis=0)
+                cur_c_losses = all_c_loss[idx].sum()
                 cur_error = input_image - cur_approx
                 print('replacing model {}/{}'.format(model+1, opts.num_models))
             else:
@@ -452,7 +505,7 @@ def main():
             for i in range(opts.max_iter):
                 results = sess.run(fetches, feed_dict)
 
-            best_loss = results['best_loss']
+            best_loss = results['best_loss'] + cur_c_losses
             best_params = results['best_params']
 
             print('  best loss so far is', best_loss)
@@ -460,46 +513,41 @@ def main():
             g_small.params.load(best_params[None,:], sess)
 
             fetches = dict(params=g_small.params,
-                           loss=g_small.loss,
+                           c_loss=g_small.c_loss,
+                           e_loss=g_small.e_loss,
                            train_op=g_small.train_op,
                            gabor=g_small.gabor)
 
             for i in range(opts.refine):
                 results = sess.run(fetches, feed_dict)
 
-            print('  refined loss is    ', results['loss'])
+            new_loss = cur_c_losses + results['c_loss'] + results['e_loss']
 
             if (is_replace and
                 prev_best_loss is not None and
-                results['loss'] >= prev_best_loss):
+                new_loss >= prev_best_loss):
                 
                 print('  not better than', prev_best_loss, 'skipping update')
                 print()
                 
             else:
 
-                prev_best_loss = results['loss']
+                prev_best_loss = new_loss
 
                 all_params[model] = results['params'][0]
                 all_approx[model] = results['gabor'][0]
+                all_c_loss[model] = results['c_loss']
 
+                cur_c_losses += results['c_loss']
                 cur_approx += all_approx[model]
+
+                outfile = 'out{:04d}.png'.format(iteration+1)
+
                 cur_error = input_image - cur_approx
+                
+                snapshot(cur_approx, input_image, weight_image,
+                         iteration, None, opts.single_snapshot)
 
-                cur_abserr = np.abs(cur_error)
-                if weight_image is not None:
-                    cur_abserr = cur_abserr * weight_image
-
-                out_img = np.hstack(( rescale(input_image, -1, 1),
-                                      rescale(cur_approx, -1, 1),
-                                      rescale(cur_abserr, 0, 1.0) ))
-
-                out_img = Image.fromarray(out_img, 'L')
-
-                outfile = 'out{:04d}.png'.format(iteration)
-                out_img.save(outfile)
-
-                print('  wrote {}'.format(outfile))
                 print()
 
             iteration += 1
