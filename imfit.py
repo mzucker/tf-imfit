@@ -6,7 +6,7 @@ import tensorflow as tf
 import numpy as np
 from PIL import Image
 
-# TODO: replace multiple parameters at once
+# DONE: replace multiple parameters at once (doesn't help)
 # TODO: large-size preview
 # TODO: load/save parameter sets
 
@@ -94,14 +94,21 @@ def get_options():
                         default=10000)
 
     parser.add_argument('-S', '--single-snapshot', action='store_true',
-                        help='do not label snapshots with iter.')
+                        help='prevent labeling snapshot images')
+
+    parser.add_argument('-b', '--batch-size', type=int, metavar='N',
+                        help='models to update per iteration',
+                        default=1)
     
-    args = parser.parse_args()
+    opts = parser.parse_args()
 
-    if args.joint_every is None:
-        args.joint_every = args.num_models
+    if opts.joint_every is None:
+        opts.joint_every = opts.num_models
 
-    return args
+    assert opts.num_models % opts.batch_size == 0
+    assert opts.joint_every % opts.batch_size == 0 
+       
+    return opts
 
 ######################################################################
 
@@ -146,27 +153,31 @@ def mix(a, b, u):
 
 class GaborModel(object):
 
-    def __init__(self, x, y, nparams, weight,
+    def __init__(self, x, y, minishape, weight,
                  cur_error_tensor,
                  separate_loss=False,
                  learning_rate=1e-4,
                  initializer=None):
 
+        num_parallel, num_joint = minishape
+
         if initializer is None:
-            gmin = GABOR_RANGE[:,0].reshape(1,GABOR_NUM_PARAMS)
-            gmax = GABOR_RANGE[:,1].reshape(1,GABOR_NUM_PARAMS)
+            gmin = GABOR_RANGE[:,0].reshape(1,1,GABOR_NUM_PARAMS)
+            gmax = GABOR_RANGE[:,1].reshape(1,1,GABOR_NUM_PARAMS)
             initializer = tf.random_uniform_initializer(minval=gmin,
                                                         maxval=gmax,
                                                         dtype=tf.float32)
-            
-        self.params = tf.get_variable('params',
-                                      shape=(nparams, GABOR_NUM_PARAMS),
-                                      dtype=tf.float32,
-                                      initializer=initializer)
 
-        l = self.params[:,GABOR_PARAM_L]
-        s = self.params[:,GABOR_PARAM_S]
-        t = self.params[:,GABOR_PARAM_T]
+        # f x b x 8
+        self.params = tf.get_variable(
+            'params',
+            shape=(num_parallel, num_joint, GABOR_NUM_PARAMS),
+            dtype=tf.float32,
+            initializer=initializer)
+
+        l = self.params[:,:,GABOR_PARAM_L]
+        s = self.params[:,:,GABOR_PARAM_S]
+        t = self.params[:,:,GABOR_PARAM_T]
 
         c0 = s - l/32
         c1 = l/2 - s
@@ -176,25 +187,28 @@ class GaborModel(object):
         cbounds = []
         for i  in range(GABOR_PARAM_P, GABOR_NUM_PARAMS):
             lo, hi = GABOR_RANGE[i]
-            var = self.params[:,i]
+            var = self.params[:,:,i]
             if lo != -np.pi:
                 cbounds.append( var - lo )
             if hi != np.pi:
                 cbounds.append( hi - var)
 
+        # f x b x k
         self.cfuncs = tf.stack( [c0, c1, c2, c3] + cbounds,
-                                axis=1, name='cfuncs' )
+                                axis=2, name='cfuncs' )
 
-        params_bcast = self.params[:,:,None,None]
+        # f x b x 8 x 1 x 1
+        params_bcast = self.params[:,:,:,None,None]
 
-        u = params_bcast[:,GABOR_PARAM_U]
-        v = params_bcast[:,GABOR_PARAM_V]
-        r = params_bcast[:,GABOR_PARAM_R]
-        p = params_bcast[:,GABOR_PARAM_P]
-        l = params_bcast[:,GABOR_PARAM_L]
-        s = params_bcast[:,GABOR_PARAM_S]
-        t = params_bcast[:,GABOR_PARAM_T]
-        h = params_bcast[:,GABOR_PARAM_H]
+        # f x b x 1 x 1
+        u = params_bcast[:,:,GABOR_PARAM_U]
+        v = params_bcast[:,:,GABOR_PARAM_V]
+        r = params_bcast[:,:,GABOR_PARAM_R]
+        p = params_bcast[:,:,GABOR_PARAM_P]
+        l = params_bcast[:,:,GABOR_PARAM_L]
+        s = params_bcast[:,:,GABOR_PARAM_S]
+        t = params_bcast[:,:,GABOR_PARAM_T]
+        h = params_bcast[:,:,GABOR_PARAM_H]
 
         cr = tf.cos(r)
         sr = tf.sin(r)
@@ -204,9 +218,13 @@ class GaborModel(object):
         s2 = s*s
         t2 = t*t
 
+        # f x b x 1 x w
         xp = x-u
+
+        # f x b x h x 1
         yp = y-v
 
+        # f x b x h x w
         b1 =  cr*xp + sr*yp
         b2 = -sr*xp + cr*yp
 
@@ -220,41 +238,50 @@ class GaborModel(object):
 
         self.gabor = tf.identity(h * w * ck, name='gabor')
 
-        cviol = tf.minimum(self.cfuncs, 0)
-        cviol = cviol**2
+        # f x h x w
+        self.gabor_sum = tf.reduce_sum(self.gabor, axis=1, name='gabor_sum')
 
-        if separate_loss:
+        # f x h x w
+        self.diff = tf.multiply((cur_error_tensor - self.gabor_sum),
+                                weight, name='diff')
 
-            self.diff = (cur_error_tensor - self.gabor) * weight
+        diffsqr = 0.5*self.diff**2
+
+        # f
+        self.e_loss_per_fit = tf.reduce_mean(diffsqr, axis=(1,2),
+                                             name='e_loss_per_fit')
+
+        # f x b x k
+        cviol = tf.pow(tf.minimum(self.cfuncs, 0), 2, name='cviol')
         
-            diffsqr = 0.5*self.diff**2
+        # f x b
+        self.c_loss_all = tf.reduce_sum(cviol, axis=2, name='c_loss_all')
 
-            self.e_losses = tf.reduce_mean(diffsqr, axis=(1,2))
-            self.c_losses = tf.reduce_mean(cviol, axis=1) 
-        
-            self.losses = ( self.e_losses + self.c_losses )
+        # f
+        self.c_loss_per_fit = tf.reduce_sum(self.c_loss_all, axis=1,
+                                            name='c_loss_per_fit')
 
-            self.losses_argmin = tf.argmin(self.losses)
+        # b
+        self.c_loss_per_batch = tf.reduce_mean(self.c_loss_all, axis=0,
+                                               name='c_loss_per_batch')
 
-            self.losses_min = self.losses[self.losses_argmin]
-            self.params_min = self.params[self.losses_argmin]
+        # f
+        self.loss_per_fit = tf.add(self.c_loss_per_fit,
+                                   self.e_loss_per_fit,
+                                   name='loss_per_fit')
 
-            self.loss = tf.reduce_mean(self.losses)
+        lpf_argmin = tf.argmin(self.loss_per_fit)
 
-        else:
-            
-            self.gabor_sum = tf.reduce_sum(self.gabor, axis=0)
-            
-            self.diff = (cur_error_tensor - self.gabor_sum[None,:,:]) * weight
+        # scalar
+        self.losses_min = self.loss_per_fit[lpf_argmin]
 
-            diffsqr = 0.5*self.diff**2
+        # b x 8
+        self.params_min = self.params[lpf_argmin]
 
-            self.c_losses = tf.reduce_mean(cviol, axis=1)
-
-            self.e_loss = tf.reduce_mean(diffsqr)
-            self.c_loss = tf.reduce_sum(self.c_losses)
-
-            self.loss = self.e_loss + self.c_loss
+        # scalars
+        self.e_loss = tf.reduce_mean(self.e_loss_per_fit, name='e_loss')
+        self.c_loss = tf.reduce_mean(self.c_loss_per_fit, name='c_loss')
+        self.loss = self.e_loss + self.c_loss
 
         with tf.variable_scope('imfit_optimizer'):
             self.opt = tf.train.AdamOptimizer(learning_rate=learning_rate)
@@ -262,7 +289,10 @@ class GaborModel(object):
 
 ######################################################################
 
-def sample_error(x, y, err, weight, lambda_err, count):
+def sample_error(x, y, err, weight, lambda_err,
+                 minishape):
+
+    num_parallel, num_joint = minishape
 
     if weight is not None:
         err = weight * err
@@ -275,13 +305,14 @@ def sample_error(x, y, err, weight, lambda_err, count):
 
     p = p.flatten()
         
-    assert y.shape == (1, h, 1)
-    assert x.shape == (1, 1, w)
+    assert y.shape == (1, 1, h, 1)
+    assert x.shape == (1, 1, 1, w)
 
     prefix_sum = np.cumsum(p)
-    r = np.random.random(count) * prefix_sum[-1]
+    r = np.random.random(minishape) * prefix_sum[-1]
 
     idx = np.searchsorted(prefix_sum, r)
+    assert(idx.shape == r.shape)
     
     row = idx / w
     col = idx % w
@@ -292,7 +323,7 @@ def sample_error(x, y, err, weight, lambda_err, count):
     u = x.flatten()[col]
     v = y.flatten()[row]
 
-    uv = np.hstack( ( u.reshape(-1, 1), v.reshape(-1, 1) ) )
+    uv = np.stack((u, v), axis=2)
 
     xf = x.flatten()
     px = xf[1] - xf[0]
@@ -340,6 +371,7 @@ def snapshot(cur_approx, input_image,
 def main():
     
     opts = get_options()
+    
 
     input_image = open_grayscale(opts.image, opts.max_size)
 
@@ -360,32 +392,33 @@ def main():
     x = (np.arange(w, dtype=np.float32) - 0.5*(w) + 0.5) * px
     y = (np.arange(h, dtype=np.float32) - 0.5*(h) + 0.5) * px
 
-    # shape is num_fits x height x width
-    x = x.reshape(1,  1, -1)
-    y = y.reshape(1, -1,  1)
+    # shape broadcastable to 1 x 1 x h x w
+    x = x.reshape(1, 1,  1, -1)
+    y = y.reshape(1, 1, -1,  1)
 
     GABOR_RANGE[GABOR_PARAM_L, 0] = 2.5*px
     GABOR_RANGE[GABOR_PARAM_T, 0] = px
     GABOR_RANGE[GABOR_PARAM_S, 0] = px
     
     cur_error_tensor = tf.placeholder(tf.float32,
-                                      shape=(1,) + input_image.shape,
+                                      shape=input_image.shape,
                                       name='cur_error')
 
     wimg = tf.constant(weight_image)
 
-    with tf.variable_scope('small'):
-        g_small = GaborModel(x, y, 1, wimg,
-                             cur_error_tensor)
-
-    with tf.variable_scope('big'):
-        g_big = GaborModel(x, y, opts.num_fits, wimg,
-                           cur_error_tensor, separate_loss=True)
-
     with tf.variable_scope('joint'):
-        g_joint = GaborModel(x, y, opts.num_models, wimg,
+        g_joint = GaborModel(x, y, (1, opts.num_models), wimg,
                              cur_error_tensor,
                              initializer=tf.zeros_initializer())
+    
+
+    with tf.variable_scope('big'):
+        g_big = GaborModel(x, y, (opts.num_fits, opts.batch_size), wimg,
+                           cur_error_tensor)
+
+    with tf.variable_scope('small'):
+        g_small = GaborModel(x, y, (1, opts.batch_size), wimg,
+                             cur_error_tensor)
         
     opt_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES,
                                  '.*/imfit_optimizer')
@@ -410,32 +443,33 @@ def main():
 
     prev_best_loss = None
 
-    
+
     with tf.Session() as sess:
 
         while True:
 
             sess.run(ginit)
-            
-            is_replace = (iteration >= opts.num_models)
+
+            midx = iteration * opts.batch_size
+            is_replace = (midx >= opts.num_models)
 
             if (is_replace and
-                (iteration - opts.num_models) % opts.joint_every == 0):
+                (midx - opts.num_models) % opts.joint_every == 0):
 
                 print('performing joint optimization!')
                 print('  previous best loss was {}'.format(prev_best_loss))
 
-                g_joint.params.load(all_params, sess)
+                g_joint.params.load(all_params[None,:,:], sess)
                 
                 cur_error = input_image
-                feed_dict = {cur_error_tensor: cur_error[None,:,:]}
+                feed_dict = {cur_error_tensor: cur_error}
 
                 fetches = dict(gabor=g_joint.gabor,
                                gabor_sum=g_joint.gabor_sum,
                                params=g_joint.params,
                                loss=g_joint.loss,
                                train_op=g_joint.train_op,
-                               c_losses=g_joint.c_losses)
+                               c_losses=g_joint.c_loss_per_batch)
 
                 for i in range(opts.joint_iter):
 
@@ -446,36 +480,42 @@ def main():
                         print('  loss at iter {:6d} is {}'.format(
                             i+1, results['loss']))
 
-
-                        snapshot(results['gabor_sum'],
+                        snapshot(results['gabor_sum'][0],
                                  input_image, weight_image,
                                  iteration, i, opts.single_snapshot)
 
                 print('  new final loss is now  {}'.format(results['loss']))
 
-                snapshot(results['gabor_sum'],
+                snapshot(results['gabor_sum'][0],
                          input_image, weight_image,
-                         iteration, opts.joint_iter, opts.single_snapshot)
+                         iteration, opts.joint_iter,
+                         opts.single_snapshot)
                 
                 if results['loss'] < prev_best_loss:
-                    all_params = results['params']
-                    all_approx = results['gabor']
+                    all_params = results['params'][0]
+                    all_approx = results['gabor'][0]
                     all_c_loss = results['c_losses']
                     prev_best_loss = results['loss']
 
                 print()
 
             if is_replace:
-                model = np.random.randint(opts.num_models)
-                idx = np.hstack((np.arange(0,model),
-                                 np.arange(model+1,opts.num_models)))
+                
+                idx = np.arange(opts.num_models)
+                np.random.shuffle(idx)
+
+                models = idx[-opts.batch_size:]
+                idx = idx[:-opts.batch_size]
+                
                 cur_approx = all_approx[idx].sum(axis=0)
                 cur_c_losses = all_c_loss[idx].sum()
                 cur_error = input_image - cur_approx
-                print('replacing model {}/{}'.format(model+1, opts.num_models))
+                
+                print('replacing models', models)
+                
             else:
-                model = iteration
-                print('training model {}/{}'.format(model+1, opts.num_models))
+                models = np.arange(opts.batch_size) + midx
+                print('training models', models)
                 
             set_pvalues = is_replace or opts.lambda_err
 
@@ -485,25 +525,31 @@ def main():
                 
                 if opts.lambda_err:
                     sample_uvs = sample_error(x, y, cur_error, weight_image,
-                                              opts.lambda_err, opts.num_fits)
-                    pvalues[:, :2] = sample_uvs
+                                              opts.lambda_err,
+                                              (opts.num_fits, opts.batch_size))
+
+                    pvalues[:, :, :2] = sample_uvs
 
                 if is_replace:
-                    pvalues[0, :] = all_params[model]
+                    pvalues[0, :, :] = all_params[models]
                 
                 g_big.params.load(pvalues, sess)
 
             fetches = dict(params=g_big.params,
                            loss=g_big.loss,
-                           losses=g_big.losses,
+                           losses=g_big.loss_per_fit,
+                           c_loss_per_fit=g_big.c_loss_per_fit,
+                           c_loss_per_batch=g_big.c_loss_per_batch,
+                           c_loss=g_big.c_loss,
                            train_op=g_big.train_op,
                            best_loss=g_big.losses_min,
                            best_params=g_big.params_min)
             
-            feed_dict = {cur_error_tensor: cur_error[None,:,:]}
+            feed_dict = {cur_error_tensor: cur_error}
           
             for i in range(opts.max_iter):
                 results = sess.run(fetches, feed_dict)
+                    
 
             best_loss = results['best_loss'] + cur_c_losses
             best_params = results['best_params']
@@ -513,15 +559,16 @@ def main():
             g_small.params.load(best_params[None,:], sess)
 
             fetches = dict(params=g_small.params,
-                           c_loss=g_small.c_loss,
-                           e_loss=g_small.e_loss,
+                           c_loss_per_batch=g_small.c_loss_per_batch,
+                           loss=g_small.loss,
                            train_op=g_small.train_op,
                            gabor=g_small.gabor)
 
             for i in range(opts.refine):
                 results = sess.run(fetches, feed_dict)
 
-            new_loss = cur_c_losses + results['c_loss'] + results['e_loss']
+            new_loss = cur_c_losses + results['loss']
+            print('  post-refine loss is', new_loss)
 
             if (is_replace and
                 prev_best_loss is not None and
@@ -534,12 +581,19 @@ def main():
 
                 prev_best_loss = new_loss
 
-                all_params[model] = results['params'][0]
-                all_approx[model] = results['gabor'][0]
-                all_c_loss[model] = results['c_loss']
+                assert(results['params'].shape == (1, opts.batch_size, 8))
 
-                cur_c_losses += results['c_loss']
-                cur_approx += all_approx[model]
+                exp_shape = (1, opts.batch_size) + input_image.shape
+
+                assert(results['gabor'].shape == exp_shape)
+                assert(results['c_loss_per_batch'].shape == (opts.batch_size,))
+                
+                all_params[models] = results['params'][0,:]
+                all_approx[models] = results['gabor'][0,:]
+                all_c_loss[models] = results['c_loss_per_batch']
+
+                cur_c_losses += results['c_loss_per_batch'].sum()
+                cur_approx += all_approx[models].sum(axis=0)
 
                 outfile = 'out{:04d}.png'.format(iteration+1)
 
