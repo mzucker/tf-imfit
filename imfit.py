@@ -6,9 +6,9 @@ import tensorflow as tf
 import numpy as np
 from PIL import Image
 
-# DONE: replace multiple parameters at once (doesn't help)
-# TODO: large-size preview
-# TODO: load/save parameter sets
+# DONE: replace multiple parameters at once (doesn't appear to help)
+# DONE: large-size preview
+# DONE: load/save parameter sets
 
 ######################################################################
 
@@ -54,7 +54,7 @@ def get_options():
 
     parser.add_argument('-m', '--max-iter', type=int, metavar='N',
                         help='maximum # of iterations per trial fit',
-                        default=10)
+                        default=100)
 
     parser.add_argument('-r', '--refine', type=int, metavar='N',
                         help='maximum # of iterations for final fit',
@@ -73,11 +73,11 @@ def get_options():
                         help='load weights from file',
                         default=512)
 
-    parser.add_argument('-i', '--input', type=argparse.FileType('r'),
+    parser.add_argument('-i', '--input', type=str,
                         metavar='PARAMFILE.txt',
                         help='read input params from file')
 
-    parser.add_argument('-o', '--output', type=argparse.FileType('w'),
+    parser.add_argument('-o', '--output', type=str,
                         metavar='PARAMFILE.txt',
                         help='write input params to file')
 
@@ -99,6 +99,9 @@ def get_options():
     parser.add_argument('-b', '--batch-size', type=int, metavar='N',
                         help='models to update per iteration',
                         default=1)
+
+    parser.add_argument('-p', '--preview-size', type=int, metavar='N',
+                        help='size of preview image')
     
     opts = parser.parse_args()
 
@@ -112,6 +115,21 @@ def get_options():
 
 ######################################################################
 
+def scale_shape(shape, desired_size):
+
+    h, w = shape
+
+    if w > h:
+        wnew = desired_size
+        hnew = int(round(float(h) * desired_size / w))
+    else:
+        wnew = int(round(float(w) * desired_size / h))
+        hnew = desired_size
+
+    return hnew, wnew
+
+######################################################################
+        
 def open_grayscale(handle, max_size):
 
     if handle is None:
@@ -124,19 +142,10 @@ def open_grayscale(handle, max_size):
         image = image.convert('L')
 
     w, h = image.size
-
     
     if max(w, h) > max_size:
-        
-        if w > h:
-            wnew = max_size
-            hnew = int(round(float(h) * max_size / w))
-        else:
-            wnew = int(round(float(w) * max_size / h))
-            hnew = max_size
-            
-        image = image.resize((wnew, hnew), resample=Image.LANCZOS)
-        w, h = wnew, hnew
+        h, w = scale_shape((h, w), max_size)
+        image = image.resize((w, h), resample=Image.LANCZOS)
 
     print('{} is {}x{}'.format(handle.name, w, h))
 
@@ -157,23 +166,34 @@ class GaborModel(object):
                  cur_error_tensor,
                  separate_loss=False,
                  learning_rate=1e-4,
-                 initializer=None):
+                 params=None,
+                 initializer=None,
+                 max_row=None):
 
         num_parallel, num_joint = minishape
 
-        if initializer is None:
-            gmin = GABOR_RANGE[:,0].reshape(1,1,GABOR_NUM_PARAMS)
-            gmax = GABOR_RANGE[:,1].reshape(1,1,GABOR_NUM_PARAMS)
-            initializer = tf.random_uniform_initializer(minval=gmin,
-                                                        maxval=gmax,
-                                                        dtype=tf.float32)
+        if max_row is None:
+            max_row = num_joint
 
-        # f x b x 8
-        self.params = tf.get_variable(
-            'params',
-            shape=(num_parallel, num_joint, GABOR_NUM_PARAMS),
-            dtype=tf.float32,
-            initializer=initializer)
+        if params is not None:
+
+            self.params = params
+
+        else:
+
+            if initializer is None:
+                gmin = GABOR_RANGE[:,0].reshape(1,1,GABOR_NUM_PARAMS)
+                gmax = GABOR_RANGE[:,1].reshape(1,1,GABOR_NUM_PARAMS)
+                initializer = tf.random_uniform_initializer(minval=gmin,
+                                                            maxval=gmax,
+                                                            dtype=tf.float32)
+
+            # f x b x 8
+            self.params = tf.get_variable(
+                'params',
+                shape=(num_parallel, num_joint, GABOR_NUM_PARAMS),
+                dtype=tf.float32,
+                initializer=initializer)
 
         l = self.params[:,:,GABOR_PARAM_L]
         s = self.params[:,:,GABOR_PARAM_S]
@@ -198,7 +218,7 @@ class GaborModel(object):
                                 axis=2, name='cfuncs' )
 
         # f x b x 8 x 1 x 1
-        params_bcast = self.params[:,:,:,None,None]
+        params_bcast = self.params[:,:max_row,:,None,None]
 
         # f x b x 1 x 1
         u = params_bcast[:,:,GABOR_PARAM_U]
@@ -240,6 +260,9 @@ class GaborModel(object):
 
         # f x h x w
         self.gabor_sum = tf.reduce_sum(self.gabor, axis=1, name='gabor_sum')
+
+        if cur_error_tensor is None:
+            return
 
         # f x h x w
         self.diff = tf.multiply((cur_error_tensor - self.gabor_sum),
@@ -342,10 +365,25 @@ def rescale(idata, imin, imax):
 
     return img
 
-def snapshot(cur_approx, input_image, 
+######################################################################
+
+def pad_right(img, width):
+
+    if img.shape[1] >= width:
+        return img
+    else:
+        return np.hstack(( img, np.zeros((img.shape[0], width-img.shape[1]),
+                                         dtype=img.dtype) ))
+
+######################################################################
+
+def snapshot(cur_gabor,
+             cur_approx,
+             input_image, 
              weight_image,
              iteration, joint_iteration,
-             single_file):
+             single_file,
+             preview_stuff):
 
     if single_file:
         outfile = 'out.png'
@@ -360,8 +398,28 @@ def snapshot(cur_approx, input_image,
 
     out_img = np.hstack(( rescale(input_image, -1, 1),
                           rescale(cur_approx, -1, 1),
+                          rescale(cur_gabor, -1, 1),
                           rescale(cur_abserr, 0, 1.0) ))
 
+    if preview_stuff is not None:
+
+        sess, g_preview, max_row = preview_stuff
+
+        max_rowval = min(iteration, g_preview.params.shape[1])
+
+        fetches = g_preview.gabor_sum
+        feed_dict = { max_row: max_rowval }
+
+        preview_image = sess.run(fetches, feed_dict)[0]
+        preview_image = rescale(preview_image, -1, 1)
+
+        max_width = max(preview_image.shape[1], out_img.shape[1])
+        
+        preview_image = pad_right(preview_image, max_width)
+        
+        out_img = pad_right(out_img, max_width)
+        out_img = np.vstack( (out_img, preview_image) )
+    
     out_img = Image.fromarray(out_img, 'L')
 
     out_img.save(outfile)
@@ -376,7 +434,25 @@ def randomize(params, rstdev):
 
     bump = np.random.normal(scale=rstdev, size=params.shape)
     
-    return params + bump*grng[None,:]
+    return params + bump*grng[None,:]    
+
+######################################################################
+
+def normalized_grid(shape):
+
+    h, w = shape
+    hwmax = max(h, w)
+
+    px = 2.0 / hwmax
+
+    x = (np.arange(w, dtype=np.float32) - 0.5*(w) + 0.5) * px
+    y = (np.arange(h, dtype=np.float32) - 0.5*(h) + 0.5) * px
+
+    # shape broadcastable to 1 x 1 x h x w
+    x = x.reshape(1, 1,  1, -1)
+    y = y.reshape(1, 1, -1,  1)
+
+    return px, x, y
 
 ######################################################################
 
@@ -396,17 +472,7 @@ def main():
     # move to -1, 1 range for input image
     input_image = input_image * 2 - 1
 
-    h, w = input_image.shape
-    hwmax = max(h, w)
-
-    px = 2.0 / hwmax
-
-    x = (np.arange(w, dtype=np.float32) - 0.5*(w) + 0.5) * px
-    y = (np.arange(h, dtype=np.float32) - 0.5*(h) + 0.5) * px
-
-    # shape broadcastable to 1 x 1 x h x w
-    x = x.reshape(1, 1,  1, -1)
-    y = y.reshape(1, 1, -1,  1)
+    px, x, y = normalized_grid(input_image.shape)
 
     GABOR_RANGE[GABOR_PARAM_L, 0] = 2.5*px
     GABOR_RANGE[GABOR_PARAM_T, 0] = px
@@ -419,8 +485,12 @@ def main():
     wimg = tf.constant(weight_image)
 
     with tf.variable_scope('joint'):
+
+        max_row = tf.placeholder(tf.int32, shape=(), name='max_row')
+        
         g_joint = GaborModel(x, y, (1, opts.num_models), wimg,
                              cur_error_tensor,
+                             max_row = max_row,
                              initializer=tf.zeros_initializer())
     
 
@@ -431,6 +501,20 @@ def main():
     with tf.variable_scope('small'):
         g_small = GaborModel(x, y, (1, opts.batch_size), wimg,
                              cur_error_tensor)
+
+    if opts.preview_size:
+
+        preview_shape = scale_shape(input_image.shape,
+                                    opts.preview_size)
+
+        _, x_preview, y_preview = normalized_grid(preview_shape)
+        
+        with tf.variable_scope('preview'):
+            g_preview = GaborModel(x_preview, y_preview,
+                                   (1, opts.num_models),
+                                   wimg, cur_error_tensor=None,
+                                   max_row=max_row,
+                                   params=g_joint.params)
         
     opt_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES,
                                  '.*/imfit_optimizer')
@@ -458,6 +542,55 @@ def main():
 
     with tf.Session() as sess:
 
+        sess.run(ginit)
+
+        if opts.input is not None:
+            if not os.path.isfile(opts.input):
+                
+                print("warning: can't load weights from", opts.input)
+                
+            else:
+                
+                foo = np.genfromtxt(opts.input, dtype=np.float32, delimiter=',')
+                nfoo = len(foo)
+
+                nfoo -= nfoo % opts.batch_size
+                nfoo = min(nfoo, opts.num_models)
+                print(foo.shape, nfoo)
+                
+                all_params[:nfoo] = foo[:nfoo]
+
+                g_joint.params.load(all_params[None,:,:], sess)
+                
+                fetches = dict(gabor=g_joint.gabor,
+                               gabor_sum=g_joint.gabor_sum,
+                               e_loss=g_joint.e_loss,
+                               c_losses=g_joint.c_loss_per_batch)
+                
+                cur_error = input_image
+                feed_dict = {cur_error_tensor: cur_error,
+                             max_row: nfoo}
+                
+                results = sess.run(fetches, feed_dict)
+
+                cur_approx = results['gabor_sum'][0]
+                cur_error = input_image - cur_approx
+                
+                all_approx[:nfoo] = results['gabor'][0, :nfoo]
+                all_c_loss[:nfoo] = results['c_losses'][:nfoo]
+
+                prev_best_loss = results['e_loss'] + all_c_loss[:nfoo].sum()
+
+                print('loaded {} models from {}; current loss is {}'.format(
+                    nfoo, opts.input, prev_best_loss))
+
+                iteration = nfoo
+
+        if opts.preview_size:
+            preview_stuff = (sess, g_preview, max_row)
+        else:
+            preview_stuff = None
+
         while True:
 
             sess.run(ginit)
@@ -475,7 +608,8 @@ def main():
                 g_joint.params.load(rparams[None,:,:], sess)
                 
                 cur_error = input_image
-                feed_dict = {cur_error_tensor: cur_error}
+                feed_dict = {cur_error_tensor: cur_error,
+                             max_row: opts.num_models}
 
                 fetches = dict(gabor=g_joint.gabor,
                                gabor_sum=g_joint.gabor_sum,
@@ -494,22 +628,32 @@ def main():
                             i+1, results['loss']))
 
                         snapshot(results['gabor_sum'][0],
+                                 results['gabor_sum'][0],
                                  input_image, weight_image,
-                                 iteration, i, opts.single_snapshot)
+                                 iteration, i, opts.single_snapshot,
+                                 preview_stuff)
 
+                        
                 print('  new final loss is now  {}'.format(results['loss']))
 
                 snapshot(results['gabor_sum'][0],
+                         results['gabor_sum'][0],
                          input_image, weight_image,
                          iteration, opts.joint_iter,
-                         opts.single_snapshot)
+                         opts.single_snapshot,
+                         preview_stuff)
                 
                 if results['loss'] < prev_best_loss:
                     all_params = results['params'][0]
                     all_approx = results['gabor'][0]
                     all_c_loss = results['c_losses']
                     prev_best_loss = results['loss']
-
+                    
+                    if opts.output is not None:
+                        np.savetxt(opts.output,
+                                   all_params[:min(iteration, opts.num_models)],
+                                   fmt='%f', delimiter=',')
+                    
                 print()
 
             if is_replace:
@@ -593,6 +737,11 @@ def main():
                 
             else:
 
+                if opts.output is not None:
+                    np.savetxt(opts.output,
+                               all_params[:min(iteration, opts.num_models)],
+                               fmt='%f', delimiter=',')
+
                 prev_best_loss = new_loss
 
                 assert(results['params'].shape == (1, opts.batch_size, 8))
@@ -612,9 +761,16 @@ def main():
                 outfile = 'out{:04d}.png'.format(iteration+1)
 
                 cur_error = input_image - cur_approx
+
+                if preview_stuff is not None:
+                    g_joint.params.load(all_params[None,:,:], sess)
+
+                foo = results['gabor'][0].sum(axis=0)
                 
-                snapshot(cur_approx, input_image, weight_image,
-                         iteration, None, opts.single_snapshot)
+                snapshot(foo,
+                         cur_approx, input_image, weight_image,
+                         iteration, None, opts.single_snapshot,
+                         preview_stuff)
 
                 print()
 
