@@ -2,6 +2,7 @@ from __future__ import print_function
 import os
 import sys
 import argparse
+from collections import namedtuple
 import tensorflow as tf
 import numpy as np
 from PIL import Image
@@ -176,7 +177,7 @@ def mix(a, b, u):
 class GaborModel(object):
 
     def __init__(self, x, y, minishape, weight,
-                 cur_error_tensor,
+                 target,
                  learning_rate=0.0001,
                  params=None,
                  initializer=None,
@@ -267,7 +268,7 @@ class GaborModel(object):
         # Everything below here is for optimizing, if we just want
         # to visualize, stop now.
         
-        if cur_error_tensor is None:
+        if target is None:
             return
 
         ############################################################
@@ -328,7 +329,7 @@ class GaborModel(object):
         # Compute loss for approximation error
         
         # f x h x w
-        self.err = tf.multiply((cur_error_tensor - self.gabor_sum),
+        self.err = tf.multiply((target - self.gabor_sum),
                                 weight, name='err')
 
         err_sqr = 0.5*self.err**2
@@ -509,6 +510,61 @@ def normalized_grid(shape):
 
 ######################################################################
 
+def setup_models(opts, x, y, weight_tensor,
+                 target_tensor, max_row):
+
+    GaborModels = namedtuple('GaborModels', 'full, par_mini, one_mini, preview')
+
+    with tf.variable_scope('full'):
+
+        full = GaborModel(x, y,
+                          (1, opts.num_models),
+                          weight_tensor,
+                          target_tensor,
+                          learning_rate=opts.learning_rate,
+                          max_row = max_row,
+                          initializer=tf.zeros_initializer())
+    
+    with tf.variable_scope('par_mini'):
+        
+        par_mini = GaborModel(x, y,
+                              (opts.num_parallel, opts.mini_ensemble_size),
+                              weight_tensor,
+                              target_tensor,
+                              learning_rate=opts.learning_rate)
+        
+    with tf.variable_scope('one_mini'):
+        
+        one_mini = GaborModel(x, y,
+                              (1, opts.mini_ensemble_size),
+                              weight_tensor,
+                              target_tensor,
+                              learning_rate=opts.learning_rate)
+        
+
+    if opts.preview_size:
+
+        preview_shape = scale_shape(map(int, target_tensor.shape),
+                                    opts.preview_size)
+
+        _, x_preview, y_preview = normalized_grid(preview_shape)
+        
+        with tf.variable_scope('preview'):
+            preview = GaborModel(x_preview, y_preview,
+                                 (1, opts.num_models),
+                                 weight_tensor,
+                                 target=None,
+                                 max_row=max_row,
+                                 params=full.params)
+
+    else:
+
+        preview = None
+
+    return GaborModels(full, par_mini, one_mini, preview)
+
+######################################################################
+
 def main():
     
     opts = get_options()
@@ -531,46 +587,18 @@ def main():
     GABOR_RANGE[GABOR_PARAM_T, 0] = px
     GABOR_RANGE[GABOR_PARAM_S, 0] = px
     
-    cur_error_tensor = tf.placeholder(tf.float32,
+    target_tensor = tf.placeholder(tf.float32,
                                       shape=input_image.shape,
                                       name='cur_error')
 
-    wimg = tf.constant(weight_image)
-
-    with tf.variable_scope('joint'):
-
-        max_row = tf.placeholder(tf.int32, shape=(), name='max_row')
-        
-        g_joint = GaborModel(x, y, (1, opts.num_models), wimg,
-                             cur_error_tensor,
-                             max_row = max_row,
-                             initializer=tf.zeros_initializer())
+    max_row = tf.placeholder(tf.int32, shape=(), name='max_row')
     
+    weight_tensor = tf.constant(weight_image)
 
-    with tf.variable_scope('big'):
-        g_big = GaborModel(x, y, (opts.num_parallel, opts.mini_ensemble_size), wimg,
-                           cur_error_tensor)
-
-    with tf.variable_scope('small'):
-        g_small = GaborModel(x, y, (1, opts.mini_ensemble_size), wimg,
-                             cur_error_tensor)
-
-    if opts.preview_size:
-
-        preview_shape = scale_shape(input_image.shape,
-                                    opts.preview_size)
-
-        _, x_preview, y_preview = normalized_grid(preview_shape)
-        
-        with tf.variable_scope('preview'):
-            g_preview = GaborModel(x_preview, y_preview,
-                                   (1, opts.num_models),
-                                   wimg, cur_error_tensor=None,
-                                   max_row=max_row,
-                                   params=g_joint.params)
-        
-    opt_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES,
-                                 '.*/imfit_optimizer')
+    g = setup_models(opts, x, y,
+                     weight_tensor,
+                     target_tensor,
+                     max_row)
 
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
@@ -613,15 +641,15 @@ def main():
                 
                 all_params[:nfoo] = foo[:nfoo]
 
-                g_joint.params.load(all_params[None,:,:], sess)
+                g.full.params.load(all_params[None,:,:], sess)
                 
-                fetches = dict(gabor=g_joint.gabor,
-                               gabor_sum=g_joint.gabor_sum,
-                               err_loss=g_joint.err_loss,
-                               con_losses=g_joint.con_loss_per_batch)
+                fetches = dict(gabor=g.full.gabor,
+                               gabor_sum=g.full.gabor_sum,
+                               err_loss=g.full.err_loss,
+                               con_losses=g.full.con_loss_per_batch)
                 
                 cur_error = input_image
-                feed_dict = {cur_error_tensor: cur_error,
+                feed_dict = {target_tensor: cur_error,
                              max_row: nfoo}
                 
                 results = sess.run(fetches, feed_dict)
@@ -640,7 +668,7 @@ def main():
                 iteration = nfoo
 
         if opts.preview_size:
-            preview_stuff = (sess, g_preview, max_row)
+            preview_stuff = (sess, g.preview, max_row)
         else:
             preview_stuff = None
 
@@ -654,22 +682,22 @@ def main():
             if (is_replace and
                 (midx - opts.num_models) % opts.full_every == 0):
 
-                print('performing joint optimization!')
+                print('performing full optimization!')
                 print('  previous best loss was {}'.format(prev_best_loss))
 
                 rparams = randomize(all_params, opts.rstdev)
-                g_joint.params.load(rparams[None,:,:], sess)
+                g.full.params.load(rparams[None,:,:], sess)
                 
                 cur_error = input_image
-                feed_dict = {cur_error_tensor: cur_error,
+                feed_dict = {target_tensor: cur_error,
                              max_row: opts.num_models}
 
-                fetches = dict(gabor=g_joint.gabor,
-                               gabor_sum=g_joint.gabor_sum,
-                               params=g_joint.params,
-                               loss=g_joint.loss,
-                               train_op=g_joint.train_op,
-                               con_losses=g_joint.con_loss_per_batch)
+                fetches = dict(gabor=g.full.gabor,
+                               gabor_sum=g.full.gabor_sum,
+                               params=g.full.params,
+                               loss=g.full.loss,
+                               train_op=g.full.train_op,
+                               con_losses=g.full.con_loss_per_batch)
 
                 for i in range(opts.full_iter):
 
@@ -731,7 +759,7 @@ def main():
 
             if set_pvalues:
 
-                pvalues = sess.run(g_big.params)
+                pvalues = sess.run(g.par_mini.params)
                 
                 if opts.lambda_err:
                     sample_uvs = sample_weighted_error(x, y, cur_error, weight_image,
@@ -744,19 +772,19 @@ def main():
                     pvalues[0, :, :] = randomize(all_params[models],
                                                  opts.rstdev)
                 
-                g_big.params.load(pvalues, sess)
+                g.par_mini.params.load(pvalues, sess)
 
-            fetches = dict(params=g_big.params,
-                           loss=g_big.loss,
-                           losses=g_big.loss_per_fit,
-                           con_loss_per_fit=g_big.con_loss_per_fit,
-                           con_loss_per_batch=g_big.con_loss_per_batch,
-                           con_loss=g_big.con_loss,
-                           train_op=g_big.train_op,
-                           best_loss=g_big.losses_min,
-                           best_params=g_big.params_min)
+            fetches = dict(params=g.par_mini.params,
+                           loss=g.par_mini.loss,
+                           losses=g.par_mini.loss_per_fit,
+                           con_loss_per_fit=g.par_mini.con_loss_per_fit,
+                           con_loss_per_batch=g.par_mini.con_loss_per_batch,
+                           con_loss=g.par_mini.con_loss,
+                           train_op=g.par_mini.train_op,
+                           best_loss=g.par_mini.losses_min,
+                           best_params=g.par_mini.params_min)
             
-            feed_dict = {cur_error_tensor: cur_error}
+            feed_dict = {target_tensor: cur_error}
           
             for i in range(opts.max_iter):
                 results = sess.run(fetches, feed_dict)
@@ -767,13 +795,13 @@ def main():
 
             print('  best loss so far is', best_loss)
 
-            g_small.params.load(best_params[None,:], sess)
+            g.one_mini.params.load(best_params[None,:], sess)
 
-            fetches = dict(params=g_small.params,
-                           con_loss_per_batch=g_small.con_loss_per_batch,
-                           loss=g_small.loss,
-                           train_op=g_small.train_op,
-                           gabor=g_small.gabor)
+            fetches = dict(params=g.one_mini.params,
+                           con_loss_per_batch=g.one_mini.con_loss_per_batch,
+                           loss=g.one_mini.loss,
+                           train_op=g.one_mini.train_op,
+                           gabor=g.one_mini.gabor)
 
             for i in range(opts.refine):
                 results = sess.run(fetches, feed_dict)
@@ -816,7 +844,7 @@ def main():
                 cur_error = input_image - cur_approx
 
                 if preview_stuff is not None:
-                    g_joint.params.load(all_params[None,:,:], sess)
+                    g.full.params.load(all_params[None,:,:], sess)
 
                 foo = results['gabor'][0].sum(axis=0)
                 
