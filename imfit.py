@@ -602,14 +602,12 @@ def main():
 
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
-
-    cur_approx = np.zeros_like(input_image)
-    cur_target = input_image - cur_approx
-    cur_con_losses = 0.0
-
-    all_params = np.zeros((opts.num_models, GABOR_NUM_PARAMS), dtype=np.float32)
-    all_approx = np.zeros((opts.num_models,) + input_image.shape, dtype=np.float32)
-    all_con_loss = np.zeros(opts.num_models, dtype=np.float32)
+    StateTuple = namedtuple('StateTuple', 'params, approx, con_loss')
+    
+    state = StateTuple(
+        params=np.zeros((opts.num_models, GABOR_NUM_PARAMS), dtype=np.float32),
+        approx=np.zeros((opts.num_models,) + input_image.shape, dtype=np.float32),
+        con_loss=np.zeros(opts.num_models, dtype=np.float32))
 
     iteration = 0
 
@@ -639,28 +637,24 @@ def main():
                 nfoo = min(nfoo, opts.num_models)
                 print(foo.shape, nfoo)
                 
-                all_params[:nfoo] = foo[:nfoo]
+                state.params[:nfoo] = foo[:nfoo]
 
-                g.full.params.load(all_params[None,:,:], sess)
+                g.full.params.load(state.params[None,:,:], sess)
                 
                 fetches = dict(gabor=g.full.gabor,
                                approx=g.full.approx,
                                err_loss=g.full.err_loss,
                                con_losses=g.full.con_loss_per_batch)
                 
-                cur_target = input_image
-                feed_dict = {target_tensor: cur_target,
+                feed_dict = {target_tensor: input_image,
                              max_row: nfoo}
                 
                 results = sess.run(fetches, feed_dict)
 
-                cur_approx = results['approx'][0]
-                cur_target = input_image - cur_approx
-                
-                all_approx[:nfoo] = results['gabor'][0, :nfoo]
-                all_con_loss[:nfoo] = results['con_losses'][:nfoo]
+                state.approx[:nfoo] = results['gabor'][0, :nfoo]
+                state.con_loss[:nfoo] = results['con_losses'][:nfoo]
 
-                prev_best_loss = results['err_loss'] + all_con_loss[:nfoo].sum()
+                prev_best_loss = results['err_loss'] + state.con_loss[:nfoo].sum()
 
                 print('loaded {} models from {}; current loss is {}'.format(
                     nfoo, opts.input, prev_best_loss))
@@ -685,11 +679,10 @@ def main():
                 print('performing full optimization!')
                 print('  previous best loss was {}'.format(prev_best_loss))
 
-                rparams = randomize(all_params, opts.rstdev)
+                rparams = randomize(state.params, opts.rstdev)
                 g.full.params.load(rparams[None,:,:], sess)
                 
-                cur_target = input_image
-                feed_dict = {target_tensor: cur_target,
+                feed_dict = {target_tensor: input_image,
                              max_row: opts.num_models}
 
                 fetches = dict(gabor=g.full.gabor,
@@ -725,14 +718,14 @@ def main():
                          preview_stuff)
                 
                 if results['loss'] < prev_best_loss:
-                    all_params = results['params'][0]
-                    all_approx = results['gabor'][0]
-                    all_con_loss = results['con_losses']
+                    state.params[:] = results['params'][0]
+                    state.approx[:] = results['gabor'][0]
+                    state.con_loss[:] = results['con_losses']
                     prev_best_loss = results['loss']
                     
                     if opts.output is not None:
                         np.savetxt(opts.output,
-                                   all_params[:min(iteration, opts.num_models)],
+                                   state.params[:min(iteration, opts.num_models)],
                                    fmt='%f', delimiter=',')
                     
                 print()
@@ -743,17 +736,20 @@ def main():
                 np.random.shuffle(idx)
 
                 models = idx[-opts.mini_ensemble_size:]
-                idx = idx[:-opts.mini_ensemble_size]
-                
-                cur_approx = all_approx[idx].sum(axis=0)
-                cur_con_losses = all_con_loss[idx].sum()
-                cur_target = input_image - cur_approx
+                rest = idx[:-opts.mini_ensemble_size]
                 
                 print('replacing models', models)
                 
             else:
+                
                 models = np.arange(opts.mini_ensemble_size) + midx
+                rest = np.arange(midx)
+                
                 print('training models', models)
+
+            cur_approx = state.approx[rest].sum(axis=0)
+            cur_con_losses = state.con_loss[rest].sum()
+            cur_target = input_image - cur_approx
                 
             set_pvalues = is_replace or opts.lambda_err
 
@@ -769,7 +765,7 @@ def main():
                     pvalues[:, :, :2] = sample_uvs
 
                 if is_replace:
-                    pvalues[0, :, :] = randomize(all_params[models],
+                    pvalues[0, :, :] = randomize(state.params[models],
                                                  opts.rstdev)
                 
                 g.par_mini.params.load(pvalues, sess)
@@ -815,7 +811,7 @@ def main():
 
                 if opts.output is not None:
                     np.savetxt(opts.output,
-                               all_params[:min(iteration, opts.num_models)],
+                               state.params[:min(iteration, opts.num_models)],
                                fmt='%f', delimiter=',')
 
                 prev_best_loss = new_loss
@@ -827,19 +823,16 @@ def main():
                 assert(results['gabor'].shape == exp_shape)
                 assert(results['con_loss_per_batch'].shape == (opts.mini_ensemble_size,))
                 
-                all_params[models] = results['params'][0,:]
-                all_approx[models] = results['gabor'][0,:]
-                all_con_loss[models] = results['con_loss_per_batch']
+                state.params[models] = results['params'][0,:]
+                state.approx[models] = results['gabor'][0,:]
+                state.con_loss[models] = results['con_loss_per_batch']
 
-                cur_con_losses += results['con_loss_per_batch'].sum()
-                cur_approx += all_approx[models].sum(axis=0)
+                cur_approx += state.approx[models].sum(axis=0)
 
                 outfile = 'out{:04d}.png'.format(iteration+1)
 
-                cur_target = input_image - cur_approx
-
                 if preview_stuff is not None:
-                    g.full.params.load(all_params[None,:,:], sess)
+                    g.full.params.load(state.params[None,:,:], sess)
 
                 foo = results['gabor'][0].sum(axis=0)
                 
