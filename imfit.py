@@ -262,7 +262,7 @@ class GaborModel(object):
         # Compute the ensemble sum of all models for each fit        
         
         # f x h x w
-        self.gabor_sum = tf.reduce_sum(self.gabor, axis=1, name='gabor_sum')
+        self.approx = tf.reduce_sum(self.gabor, axis=1, name='approx')
 
         ############################################################
         # Everything below here is for optimizing, if we just want
@@ -329,7 +329,7 @@ class GaborModel(object):
         # Compute loss for approximation error
         
         # f x h x w
-        self.err = tf.multiply((target - self.gabor_sum),
+        self.err = tf.multiply((target - self.approx),
                                 weight, name='err')
 
         err_sqr = 0.5*self.err**2
@@ -461,7 +461,7 @@ def snapshot(cur_gabor,
 
         max_rowval = min(iteration, g_preview.params.shape[1])
 
-        fetches = g_preview.gabor_sum
+        fetches = g_preview.approx
         feed_dict = { max_row: max_rowval }
 
         preview_image = sess.run(fetches, feed_dict)[0]
@@ -589,7 +589,7 @@ def main():
     
     target_tensor = tf.placeholder(tf.float32,
                                       shape=input_image.shape,
-                                      name='cur_error')
+                                      name='target')
 
     max_row = tf.placeholder(tf.int32, shape=(), name='max_row')
     
@@ -604,7 +604,7 @@ def main():
 
 
     cur_approx = np.zeros_like(input_image)
-    cur_error = input_image - cur_approx
+    cur_target = input_image - cur_approx
     cur_con_losses = 0.0
 
     all_params = np.zeros((opts.num_models, GABOR_NUM_PARAMS), dtype=np.float32)
@@ -644,18 +644,18 @@ def main():
                 g.full.params.load(all_params[None,:,:], sess)
                 
                 fetches = dict(gabor=g.full.gabor,
-                               gabor_sum=g.full.gabor_sum,
+                               approx=g.full.approx,
                                err_loss=g.full.err_loss,
                                con_losses=g.full.con_loss_per_batch)
                 
-                cur_error = input_image
-                feed_dict = {target_tensor: cur_error,
+                cur_target = input_image
+                feed_dict = {target_tensor: cur_target,
                              max_row: nfoo}
                 
                 results = sess.run(fetches, feed_dict)
 
-                cur_approx = results['gabor_sum'][0]
-                cur_error = input_image - cur_approx
+                cur_approx = results['approx'][0]
+                cur_target = input_image - cur_approx
                 
                 all_approx[:nfoo] = results['gabor'][0, :nfoo]
                 all_con_loss[:nfoo] = results['con_losses'][:nfoo]
@@ -688,12 +688,12 @@ def main():
                 rparams = randomize(all_params, opts.rstdev)
                 g.full.params.load(rparams[None,:,:], sess)
                 
-                cur_error = input_image
-                feed_dict = {target_tensor: cur_error,
+                cur_target = input_image
+                feed_dict = {target_tensor: cur_target,
                              max_row: opts.num_models}
 
                 fetches = dict(gabor=g.full.gabor,
-                               gabor_sum=g.full.gabor_sum,
+                               approx=g.full.approx,
                                params=g.full.params,
                                loss=g.full.loss,
                                train_op=g.full.train_op,
@@ -708,8 +708,8 @@ def main():
                         print('  loss at iter {:6d} is {}'.format(
                             i+1, results['loss']))
 
-                        snapshot(results['gabor_sum'][0],
-                                 results['gabor_sum'][0],
+                        snapshot(results['approx'][0],
+                                 results['approx'][0],
                                  input_image, weight_image,
                                  iteration, i, opts.label_snapshot,
                                  preview_stuff)
@@ -717,8 +717,8 @@ def main():
                         
                 print('  new final loss is now  {}'.format(results['loss']))
 
-                snapshot(results['gabor_sum'][0],
-                         results['gabor_sum'][0],
+                snapshot(results['approx'][0],
+                         results['approx'][0],
                          input_image, weight_image,
                          iteration, opts.full_iter,
                          opts.label_snapshot,
@@ -747,7 +747,7 @@ def main():
                 
                 cur_approx = all_approx[idx].sum(axis=0)
                 cur_con_losses = all_con_loss[idx].sum()
-                cur_error = input_image - cur_approx
+                cur_target = input_image - cur_approx
                 
                 print('replacing models', models)
                 
@@ -762,7 +762,7 @@ def main():
                 pvalues = sess.run(g.par_mini.params)
                 
                 if opts.lambda_err:
-                    sample_uvs = sample_weighted_error(x, y, cur_error, weight_image,
+                    sample_uvs = sample_weighted_error(x, y, cur_target, weight_image,
                                               opts.lambda_err,
                                               (opts.num_parallel, opts.mini_ensemble_size))
 
@@ -775,16 +775,11 @@ def main():
                 g.par_mini.params.load(pvalues, sess)
 
             fetches = dict(params=g.par_mini.params,
-                           loss=g.par_mini.loss,
-                           losses=g.par_mini.loss_per_fit,
-                           con_loss_per_fit=g.par_mini.con_loss_per_fit,
-                           con_loss_per_batch=g.par_mini.con_loss_per_batch,
-                           con_loss=g.par_mini.con_loss,
                            train_op=g.par_mini.train_op,
                            best_loss=g.par_mini.losses_min,
                            best_params=g.par_mini.params_min)
             
-            feed_dict = {target_tensor: cur_error}
+            feed_dict = {target_tensor: cur_target}
           
             for i in range(opts.max_iter):
                 results = sess.run(fetches, feed_dict)
@@ -841,7 +836,7 @@ def main():
 
                 outfile = 'out{:04d}.png'.format(iteration+1)
 
-                cur_error = input_image - cur_approx
+                cur_target = input_image - cur_approx
 
                 if preview_stuff is not None:
                     g.full.params.load(all_params[None,:,:], sess)
