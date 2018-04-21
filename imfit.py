@@ -510,65 +510,11 @@ def normalized_grid(shape):
 
 ######################################################################
 
-def setup_models(opts, x, y, weight_tensor,
-                 target_tensor, max_row):
+def setup_inputs(opts):
 
-    GaborModels = namedtuple('GaborModels', 'full, par_mini, one_mini, preview')
-
-    with tf.variable_scope('full'):
-
-        full = GaborModel(x, y,
-                          (1, opts.num_models),
-                          weight_tensor,
-                          target_tensor,
-                          learning_rate=opts.learning_rate,
-                          max_row = max_row,
-                          initializer=tf.zeros_initializer())
-    
-    with tf.variable_scope('par_mini'):
-        
-        par_mini = GaborModel(x, y,
-                              (opts.num_parallel, opts.mini_ensemble_size),
-                              weight_tensor,
-                              target_tensor,
-                              learning_rate=opts.learning_rate)
-        
-    with tf.variable_scope('one_mini'):
-        
-        one_mini = GaborModel(x, y,
-                              (1, opts.mini_ensemble_size),
-                              weight_tensor,
-                              target_tensor,
-                              learning_rate=opts.learning_rate)
-        
-
-    if opts.preview_size:
-
-        preview_shape = scale_shape(map(int, target_tensor.shape),
-                                    opts.preview_size)
-
-        _, x_preview, y_preview = normalized_grid(preview_shape)
-        
-        with tf.variable_scope('preview'):
-            preview = GaborModel(x_preview, y_preview,
-                                 (1, opts.num_models),
-                                 weight_tensor,
-                                 target=None,
-                                 max_row=max_row,
-                                 params=full.params)
-
-    else:
-
-        preview = None
-
-    return GaborModels(full, par_mini, one_mini, preview)
-
-######################################################################
-
-def main():
-    
-    opts = get_options()
-    
+    InputsTuple = namedtuple('InputsTuple',
+                             'input_image, weight_image, '
+                             'x, y, target_tensor, max_row')
 
     input_image = open_grayscale(opts.image, opts.max_size)
 
@@ -580,7 +526,7 @@ def main():
 
     # move to -1, 1 range for input image
     input_image = input_image * 2 - 1
-
+    
     px, x, y = normalized_grid(input_image.shape)
 
     GABOR_RANGE[GABOR_PARAM_L, 0] = 2.5*px
@@ -588,17 +534,127 @@ def main():
     GABOR_RANGE[GABOR_PARAM_S, 0] = px
     
     target_tensor = tf.placeholder(tf.float32,
-                                      shape=input_image.shape,
-                                      name='target')
+                                   shape=input_image.shape,
+                                   name='target')
 
-    max_row = tf.placeholder(tf.int32, shape=(), name='max_row')
+    max_row = tf.placeholder(tf.int32, shape=(),
+                             name='max_row')
+
+    return InputsTuple(input_image, weight_image,
+                       x, y, target_tensor, max_row)
+
+######################################################################
+
+def setup_models(opts, inputs):
+
+    ModelsTuple = namedtuple('ModelsTuple',
+                             'full, par_mini, one_mini, preview')
     
-    weight_tensor = tf.constant(weight_image)
+    weight_tensor = tf.constant(inputs.weight_image)
 
-    g = setup_models(opts, x, y,
-                     weight_tensor,
-                     target_tensor,
-                     max_row)
+    x_tensor = tf.constant(inputs.x)
+    y_tensor = tf.constant(inputs.y)
+
+    with tf.variable_scope('full'):
+
+        full = GaborModel(x_tensor, y_tensor,
+                          (1, opts.num_models),
+                          weight_tensor,
+                          inputs.target_tensor,
+                          learning_rate=opts.learning_rate,
+                          max_row = inputs.max_row,
+                          initializer=tf.zeros_initializer())
+    
+    with tf.variable_scope('par_mini'):
+        
+        par_mini = GaborModel(x_tensor, y_tensor,
+                              (opts.num_parallel, opts.mini_ensemble_size),
+                              weight_tensor,
+                              inputs.target_tensor,
+                              learning_rate=opts.learning_rate)
+        
+    with tf.variable_scope('one_mini'):
+        
+        one_mini = GaborModel(x_tensor, y_tensor,
+                              (1, opts.mini_ensemble_size),
+                              weight_tensor,
+                              inputs.target_tensor,
+                              learning_rate=opts.learning_rate)
+        
+
+    if opts.preview_size:
+
+        preview_shape = scale_shape(map(int, inputs.target_tensor.shape),
+                                    opts.preview_size)
+
+        _, x_preview, y_preview = normalized_grid(preview_shape)
+        
+        with tf.variable_scope('preview'):
+            preview = GaborModel(x_preview, y_preview,
+                                 (1, opts.num_models),
+                                 weight_tensor,
+                                 target=None,
+                                 max_row=inputs.max_row,
+                                 params=full.params)
+
+    else:
+
+        preview = None
+
+    return ModelsTuple(full, par_mini, one_mini, preview)
+
+######################################################################
+
+def load_params(opts, inputs, g, state, sess):
+
+    iparams = np.genfromtxt(opts.input, dtype=np.float32, delimiter=',')
+    nparams = len(iparams)
+
+    nparams -= nparams % opts.mini_ensemble_size
+    nparams = min(nparams, opts.num_models)
+
+    if nparams < len(iparams):
+        print('warning: truncating input to {} models '
+              'by randomly discarding {} models!'.format(
+                  nparams, len(iparams)-nparams))
+        idx = np.arange(len(iparams))
+        np.random.shuffle(idx)
+        iparams = iparams[idx[:nparams]]
+
+    state.params[:nparams] = iparams
+
+    g.full.params.load(state.params[None,:,:], sess)
+
+    fetches = dict(gabor=g.full.gabor,
+                   approx=g.full.approx,
+                   err_loss=g.full.err_loss,
+                   con_losses=g.full.con_loss_per_batch)
+
+    feed_dict = {inputs.target_tensor: inputs.input_image,
+                 inputs.max_row: nparams}
+
+    results = sess.run(fetches, feed_dict)
+
+    state.approx[:nparams] = results['gabor'][0, :nparams]
+    state.con_loss[:nparams] = results['con_losses'][:nparams]
+
+    prev_best_loss = results['err_loss'] + state.con_loss[:nparams].sum()
+
+    print('loaded {} models from {}; current loss is {}'.format(
+        nparams, opts.input, prev_best_loss))
+
+    iteration = nparams
+
+    return prev_best_loss, iteration
+        
+######################################################################
+
+def main():
+    
+    opts = get_options()
+
+    inputs = setup_inputs(opts)
+    g = setup_models(opts, inputs)
 
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
@@ -606,7 +662,7 @@ def main():
     
     state = StateTuple(
         params=np.zeros((opts.num_models, GABOR_NUM_PARAMS), dtype=np.float32),
-        approx=np.zeros((opts.num_models,) + input_image.shape, dtype=np.float32),
+        approx=np.zeros((opts.num_models,) + inputs.input_image.shape, dtype=np.float32),
         con_loss=np.zeros(opts.num_models, dtype=np.float32))
 
     iteration = 0
@@ -629,40 +685,12 @@ def main():
                 print("warning: can't load weights from", opts.input)
                 
             else:
+
+                prev_best_loss, iteration = load_params(opts, inputs, g, state, sess)
                 
-                foo = np.genfromtxt(opts.input, dtype=np.float32, delimiter=',')
-                nfoo = len(foo)
-
-                nfoo -= nfoo % opts.mini_ensemble_size
-                nfoo = min(nfoo, opts.num_models)
-                print(foo.shape, nfoo)
-                
-                state.params[:nfoo] = foo[:nfoo]
-
-                g.full.params.load(state.params[None,:,:], sess)
-                
-                fetches = dict(gabor=g.full.gabor,
-                               approx=g.full.approx,
-                               err_loss=g.full.err_loss,
-                               con_losses=g.full.con_loss_per_batch)
-                
-                feed_dict = {target_tensor: input_image,
-                             max_row: nfoo}
-                
-                results = sess.run(fetches, feed_dict)
-
-                state.approx[:nfoo] = results['gabor'][0, :nfoo]
-                state.con_loss[:nfoo] = results['con_losses'][:nfoo]
-
-                prev_best_loss = results['err_loss'] + state.con_loss[:nfoo].sum()
-
-                print('loaded {} models from {}; current loss is {}'.format(
-                    nfoo, opts.input, prev_best_loss))
-
-                iteration = nfoo
 
         if opts.preview_size:
-            preview_stuff = (sess, g.preview, max_row)
+            preview_stuff = (sess, g.preview, inputs.max_row)
         else:
             preview_stuff = None
 
@@ -682,8 +710,8 @@ def main():
                 rparams = randomize(state.params, opts.rstdev)
                 g.full.params.load(rparams[None,:,:], sess)
                 
-                feed_dict = {target_tensor: input_image,
-                             max_row: opts.num_models}
+                feed_dict = {inputs.target_tensor: inputs.input_image,
+                             inputs.max_row: opts.num_models}
 
                 fetches = dict(gabor=g.full.gabor,
                                approx=g.full.approx,
@@ -703,7 +731,7 @@ def main():
 
                         snapshot(results['approx'][0],
                                  results['approx'][0],
-                                 input_image, weight_image,
+                                 inputs.input_image, inputs.weight_image,
                                  iteration, i, opts.label_snapshot,
                                  preview_stuff)
 
@@ -712,7 +740,7 @@ def main():
 
                 snapshot(results['approx'][0],
                          results['approx'][0],
-                         input_image, weight_image,
+                         inputs.input_image, inputs.weight_image,
                          iteration, opts.full_iter,
                          opts.label_snapshot,
                          preview_stuff)
@@ -749,7 +777,7 @@ def main():
 
             cur_approx = state.approx[rest].sum(axis=0)
             cur_con_losses = state.con_loss[rest].sum()
-            cur_target = input_image - cur_approx
+            cur_target = inputs.input_image - cur_approx
                 
             set_pvalues = is_replace or opts.lambda_err
 
@@ -758,7 +786,7 @@ def main():
                 pvalues = sess.run(g.par_mini.params)
                 
                 if opts.lambda_err:
-                    sample_uvs = sample_weighted_error(x, y, cur_target, weight_image,
+                    sample_uvs = sample_weighted_error(inputs.x, inputs.y, cur_target, inputs.weight_image,
                                               opts.lambda_err,
                                               (opts.num_parallel, opts.mini_ensemble_size))
 
@@ -775,7 +803,7 @@ def main():
                            best_loss=g.par_mini.losses_min,
                            best_params=g.par_mini.params_min)
             
-            feed_dict = {target_tensor: cur_target}
+            feed_dict = {inputs.target_tensor: cur_target}
           
             for i in range(opts.max_iter):
                 results = sess.run(fetches, feed_dict)
@@ -818,7 +846,7 @@ def main():
 
                 assert(results['params'].shape == (1, opts.mini_ensemble_size, 8))
 
-                exp_shape = (1, opts.mini_ensemble_size) + input_image.shape
+                exp_shape = (1, opts.mini_ensemble_size) + inputs.input_image.shape
 
                 assert(results['gabor'].shape == exp_shape)
                 assert(results['con_loss_per_batch'].shape == (opts.mini_ensemble_size,))
@@ -834,10 +862,9 @@ def main():
                 if preview_stuff is not None:
                     g.full.params.load(state.params[None,:,:], sess)
 
-                foo = results['gabor'][0].sum(axis=0)
                 
-                snapshot(foo,
-                         cur_approx, input_image, weight_image,
+                snapshot(results['gabor'][0].sum(axis=0),
+                         cur_approx, inputs.input_image, inputs.weight_image,
                          iteration, None, opts.label_snapshot,
                          preview_stuff)
 
