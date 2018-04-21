@@ -407,6 +407,7 @@ def sample_weighted_error(opts, inputs, err):
     return uv
 
 ######################################################################
+# Rescale image to map given bounds to [0,255] uint8
 
 def rescale(idata, imin, imax):
 
@@ -418,6 +419,7 @@ def rescale(idata, imin, imax):
     return img
 
 ######################################################################
+# Apply padding to right hand side of image
 
 def pad_right(img, width):
 
@@ -429,6 +431,7 @@ def pad_right(img, width):
         return np.hstack(( img, padding ))
 
 ######################################################################
+# Save a snapshot of the current state to a PNG file
 
 def snapshot(cur_gabor, cur_approx,
              opts, inputs, models, sess,
@@ -472,6 +475,7 @@ def snapshot(cur_gabor, cur_approx,
     out_img.save(outfile)
 
 ######################################################################
+# Apply a small perturbation to the input parameters
 
 def randomize(params, rstdev):
 
@@ -484,6 +488,8 @@ def randomize(params, rstdev):
     return params + bump*grng[None,:]    
 
 ######################################################################
+# Compute x/y coordinates for a grid spanning [-1, 1] for the given
+# image shape (h, w)
 
 def normalized_grid(shape):
 
@@ -502,6 +508,7 @@ def normalized_grid(shape):
     return px, x, y
 
 ######################################################################
+# Set up all of the tensorflow inputs to our models
 
 def setup_inputs(opts):
 
@@ -537,6 +544,8 @@ def setup_inputs(opts):
                        x, y, target_tensor, max_row)
 
 ######################################################################
+# Set up tensorflow models themselves. We need a separate model for
+# each combination of inputs/dimensions to optimize.
 
 def setup_models(opts, inputs):
 
@@ -597,6 +606,7 @@ def setup_models(opts, inputs):
     return ModelsTuple(full, par_mini, one_mini, preview)
 
 ######################################################################
+# Load weights from file.
 
 def load_params(opts, inputs, models, state, sess):
 
@@ -643,6 +653,8 @@ def load_params(opts, inputs, models, state, sess):
     return prev_best_loss, iteration
 
 ######################################################################
+# Set up state variables to record weights, Gabor approximations, &
+# losses that need to persist across loops.
 
 def setup_state(opts, inputs):
 
