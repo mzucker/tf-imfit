@@ -72,6 +72,11 @@ def get_options():
                         help='time limit (e.g. 1:30 or 1h30m)',
                         default=None)
 
+    parser.add_argument('-T', '--total-iterations', type=int,
+                        metavar='N',
+                        help='total limit on outer loop iterations',
+                        default=None)
+
     parser.add_argument('-n', '--num-models', type=int, metavar='N',
                         help='number of models to fit',
                         default=128)
@@ -83,6 +88,7 @@ def get_options():
     parser.add_argument('-m', '--max-iter', type=int, metavar='N',
                         help='maximum # of iterations per trial fit',
                         default=100)
+
 
     parser.add_argument('-r', '--refine', type=int, metavar='N',
                         help='maximum # of iterations for final fit',
@@ -903,6 +909,7 @@ def main():
 
     prev_best_loss = None
     iteration = 0
+    loop_count = 0
 
     ############################################################
     # Finalize the graph before doing anything with a tf.Session() -
@@ -947,6 +954,12 @@ def main():
                     print('exceeded time limit of {}s, quitting!'.format(
                         opts.time_limit))
                     break
+
+            if ( opts.total_iterations is not None and
+                 loop_count >= opts.total_iterations ):
+                print('reached {} outer loop iterations, quitting!'.format(
+                    opts.total_iterations))
+                break
 
             # Initialize all global vars (including optimizer-internal vars)
             sess.run(ginit)
@@ -1010,6 +1023,7 @@ def main():
 
             # Done this loop
             iteration += 1
+            loop_count += 1
             
 if __name__ == '__main__':
     main()
