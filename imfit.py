@@ -75,7 +75,7 @@ def get_options():
     parser.add_argument('-w', '--weights', type=argparse.FileType('r'),
                         metavar='WEIGHTS.png',
                         help='load weights from file',
-                        default=512)
+                        default=None)
 
     parser.add_argument('-i', '--input', type=str,
                         metavar='PARAMFILE.txt',
@@ -646,6 +646,14 @@ def load_params(opts, inputs, models, state, sess):
 
     prev_best_loss = results['err_loss'] + state.con_loss[:nparams].sum()
 
+    cur_gabor = results['approx'][0]
+    print(cur_gabor.shape)
+
+    if opts.preview_size:
+        models.full.params.load(state.params[None,:])
+    
+    snapshot(cur_gabor, cur_gabor, opts, inputs, models, sess, nparams, 0)
+    
     print('current loss is {}'.format(prev_best_loss))
 
     iteration = nparams
