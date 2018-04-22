@@ -1,7 +1,6 @@
 from __future__ import print_function
-import os
-import sys
-import argparse
+import re, os, sys, argparse
+from datetime import datetime
 from collections import namedtuple
 import tensorflow as tf
 import numpy as np
@@ -33,6 +32,30 @@ GABOR_RANGE = np.array([
     [ 0, 2 ] ])
 
 ######################################################################
+# Parse a duration string
+
+def parse_duration(dstr):
+
+    expr = r'^(([0-9]+)(:|h))?([0-9]+)((:|m)(([0-9]+)s?))?$'
+
+    g = re.match(expr, dstr)
+
+    if g is None:
+        raise argparse.ArgumentTypeError(dstr + ': invalid duration format')
+
+    def make_int(x):
+        if x is None:
+            return 0
+        else:
+            return int(x)
+
+    h = make_int( g.group(2) )
+    m = make_int( g.group(4) )
+    s = make_int( g.group(8) )
+
+    return (h*60 + m)*60 + s
+
+######################################################################
 # Parse command-line options, return namespace containing results
 
 def get_options():
@@ -43,6 +66,11 @@ def get_options():
     parser.add_argument('image', type=argparse.FileType('r'),
                         metavar='IMAGE.png',
                         help='image to approximate')
+
+    parser.add_argument('-t', '--time-limit', type=parse_duration,
+                        metavar='LIMIT',
+                        help='time limit (e.g. 1:30 or 1h30m)',
+                        default=None)
 
     parser.add_argument('-n', '--num-models', type=int, metavar='N',
                         help='number of models to fit',
@@ -647,7 +675,6 @@ def load_params(opts, inputs, models, state, sess):
     prev_best_loss = results['err_loss'] + state.con_loss[:nparams].sum()
 
     cur_gabor = results['approx'][0]
-    print(cur_gabor.shape)
 
     if opts.preview_size:
         models.full.params.load(state.params[None,:])
@@ -908,8 +935,18 @@ def main():
                                                         models, state,
                                                         sess)
 
+        # Get start time
+        start_time = datetime.now()
+
         # Optimization loop (hit Ctrl+C to quit)
         while True:
+
+            if opts.time_limit is not None:
+                elapsed = (datetime.now() - start_time).total_seconds()
+                if elapsed > opts.time_limit:
+                    print('exceeded time limit of {}s, quitting!'.format(
+                        opts.time_limit))
+                    break
 
             # Initialize all global vars (including optimizer-internal vars)
             sess.run(ginit)
