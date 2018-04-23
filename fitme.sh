@@ -1,6 +1,6 @@
 mkdir -p results results/lores results/midres results/hires results/final
 
-# 2m14s to get to ~0.00014
+# 2m14s to get to ~0.00016
 rm results/lores/*.png; time python imfit.py images/zz_rect.png -w images/zz_rect_weights.png -s 64 -T 256 -o results/weights_lores.txt -S -x results/lores/out
 
 # Note we do full updates more often, train/replace 2 models at a time, fuzz a bit more
