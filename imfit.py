@@ -130,8 +130,12 @@ def get_options():
                         help='maximum # of iterations for joint optimization',
                         default=10000)
     
-    parser.add_argument('-r', '--learning-rate', type=float, metavar='R',
-                        help='learning rate for AdamOptimizer',
+    parser.add_argument('-r', '--local-learning-rate', type=float, metavar='R',
+                        help='learning rate for local opt.',
+                        default=0.01)
+
+    parser.add_argument('-R', '--full-learning-rate', type=float, metavar='R',
+                        help='learning rate for full opt.',
                         default=0.001)
     
     parser.add_argument('-B', '--lambda-err', type=float,
@@ -227,8 +231,8 @@ class GaborModel(object):
         if max_row is None:
             max_row = ensemble_size
 
-        gmin = GABOR_RANGE[:,0].reshape(1,1,GABOR_NUM_PARAMS)
-        gmax = GABOR_RANGE[:,1].reshape(1,1,GABOR_NUM_PARAMS)
+        gmin = GABOR_RANGE[:,0].reshape(1,1,GABOR_NUM_PARAMS).copy()
+        gmax = GABOR_RANGE[:,1].reshape(1,1,GABOR_NUM_PARAMS).copy()
             
         # Parameter tensor could be passed in or created here
         if params is not None:
@@ -248,6 +252,9 @@ class GaborModel(object):
                 shape=(num_parallel, ensemble_size, GABOR_NUM_PARAMS),
                 dtype=tf.float32,
                 initializer=initializer)
+
+        gmin[:,:,:GABOR_PARAM_L] = -np.inf
+        gmax[:,:,:GABOR_PARAM_L] =  np.inf
 
         self.cparams = tf.clip_by_value(self.params[:,:max_row],
                                         gmin, gmax,
@@ -610,7 +617,7 @@ def setup_models(opts, inputs):
                           (1, opts.num_models),
                           weight_tensor,
                           inputs.target_tensor,
-                          learning_rate=opts.learning_rate,
+                          learning_rate=opts.full_learning_rate,
                           max_row = inputs.max_row,
                           initializer=tf.zeros_initializer())
     
@@ -620,7 +627,7 @@ def setup_models(opts, inputs):
                            (opts.num_local, opts.mini_ensemble_size),
                            weight_tensor,
                            inputs.target_tensor,
-                           learning_rate=opts.learning_rate)
+                           learning_rate=opts.local_learning_rate)
         
 
     if opts.preview_size:
@@ -782,11 +789,6 @@ def full_optimize(opts, inputs, models, state, sess,
         state.con_loss[:max_rowval] = results['con_losses'][0]
         prev_best_loss = results['loss']
 
-        if opts.output is not None:
-            np.savetxt(opts.output,
-                       state.params[:max_rowval],
-                       fmt='%f', delimiter=',')
-
     print()
 
     return prev_best_loss
@@ -858,11 +860,6 @@ def local_optimize(opts, inputs, models, state, sess,
 
     if prev_best_loss is None or new_loss < prev_best_loss:
 
-        if opts.output is not None:
-            np.savetxt(opts.output,
-                       state.params[:min(model_start_idx, opts.num_models)],
-                       fmt='%f', delimiter=',')
-
         prev_best_loss = new_loss
 
         state.params[model_idx] = new_params
@@ -920,24 +917,25 @@ def main():
         # Parse input file
         if opts.input is not None:
             
-            if not os.path.isfile(opts.input):
-                
-                print("warning: can't load weights from", opts.input)
-                
-            else:
+            prev_best_loss, model_start_idx = load_params(opts, inputs,
+                                                          models, state,
+                                                          sess)
 
-                prev_best_loss, model_start_idx = load_params(opts, inputs,
-                                                              models, state,
-                                                              sess)
+            loop_count = -1
 
-                loop_count = -1
+            if opts.time_limit != 0 and opts.total_iterations != 0:
+                prev_best_loss = full_optimize(opts, inputs, models, state,
+                                               sess,
+                                               loop_count,
+                                               model_start_idx,
+                                               prev_best_loss)
 
-                if opts.time_limit != 0 and opts.total_iterations != 0:
-                    prev_best_loss = full_optimize(opts, inputs, models, state,
-                                                   sess,
-                                                   loop_count,
-                                                   model_start_idx,
-                                                   prev_best_loss)
+            if opts.output is not None:
+                np.savetxt(opts.output, state.params,
+                           fmt='%f', delimiter=',')
+
+            rollback_state = copy_state(state)
+            rollback_loss = prev_best_loss
                     
         loop_count = 0
                     
@@ -1029,11 +1027,10 @@ def main():
                         prev_best_loss, rollback_loss))
                     prev_best_loss = rollback_loss
                     state = copy_state(rollback_state)
-                    if opts.output is not None:
-                        np.savetxt(opts.output,
-                                   state.params,
-                                   fmt='%f', delimiter=',')
                     
+                if opts.output is not None:
+                    np.savetxt(opts.output, state.params,
+                               fmt='%f', delimiter=',')
                 
             # Finished with this loop iteration
             loop_count += 1
