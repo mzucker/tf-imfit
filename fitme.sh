@@ -1,10 +1,10 @@
 mkdir -p results results/lores results/midres results/hires results/final
 
-# 2m14s to get to ~0.00016
+# 2m14s to get to 0.00016
 rm results/lores/*.png; time python imfit.py images/zz_rect.png -w images/zz_rect_weights.png -s 64 -T 256 -a 0.01 -o results/weights_lores.txt -S -x results/lores/out
 
 
-# 8m1s to get to 0.00028
+# 7m53s to get to 0.00027
 rm results/midres/*.png; time python imfit.py images/zz_rect.png -w images/zz_rect_weights.png -s 96 -T 384 -a 0.04 -i results/weights_lores.txt -o results/weights_midres.txt -S -x results/midres/out
 
 
