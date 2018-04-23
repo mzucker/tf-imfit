@@ -122,7 +122,7 @@ def get_options():
                         help='maximum # of iterations per local fit',
                         default=100)
     
-    parser.add_argument('-F', '--full-every', type=int, metavar='N', default=8,
+    parser.add_argument('-F', '--full-every', type=int, metavar='N', default=32,
                         help='perform joint optimization after every N outer loops')
 
     parser.add_argument('-f', '--full-iter', type=int, metavar='N',
@@ -144,10 +144,11 @@ def get_options():
     parser.add_argument('-c', '--copy-quantity', type=float,
                         metavar='C',
                         help='number or fraction of re-fits to initialize with cur. model',
-                        default=1)
+                        default=0.5)
 
-    parser.add_argument('-a', '--anneal-temp', type=float, metavar='T',
-                        help='temperature for simulated annealing',
+    parser.add_argument('-b', '--lambda-loss', type=float,
+                        metavar='LAMBDA',
+                        help='weight on Boltzmann sampling of local fit loss',
                         default=0.0)
     
     parser.add_argument('-B', '--lambda-err', type=float,
@@ -158,8 +159,8 @@ def get_options():
     parser.add_argument('-S', '--label-snapshot', action='store_true',
                         help='individually label snapshots (good for anim. gif)')
  
-    parser.add_argument('-b', '--snapshot-base', type=str, metavar='BASENAME',
-                        help='base name for snapshots', default='out')
+    parser.add_argument('-x', '--snapshot-prefix', type=str, metavar='BASENAME',
+                        help='prefix for snapshots', default='out')
   
     opts = parser.parse_args()
 
@@ -433,6 +434,19 @@ class GaborModel(object):
             self.train_op = self.opt.minimize(self.loss)
 
 ######################################################################
+# Multinomial sampling.
+            
+def sample_multinomial(p, rshape):
+
+    prefix_sum = np.cumsum(p)
+    r = np.random.random(rshape) * prefix_sum[-1]
+
+    idx = np.searchsorted(prefix_sum, r)
+    assert(idx.shape == r.shape)
+    
+    return idx
+    
+######################################################################
 # Multinomial sampling of weighted error using Boltzmann-style
 # distribution
 
@@ -451,12 +465,8 @@ def sample_weighted_error(opts, inputs, err):
     assert inputs.y.shape == (1, 1, h, 1)
     assert inputs.x.shape == (1, 1, 1, w)
 
-    prefix_sum = np.cumsum(p)
     rshape = (opts.num_local, opts.mini_ensemble_size)
-    r = np.random.random(rshape) * prefix_sum[-1]
-
-    idx = np.searchsorted(prefix_sum, r)
-    assert(idx.shape == r.shape)
+    idx = sample_multinomial(p, rshape)
     
     row = idx / w
     col = idx % w
@@ -520,13 +530,13 @@ def snapshot(cur_gabor, cur_approx,
              full_iteration):
 
     if not opts.label_snapshot:
-        outfile = '{}.png'.format(opts.snapshot_base)
+        outfile = '{}.png'.format(opts.snapshot_prefix)
     elif isinstance(full_iteration, int):
         outfile = '{}{:04d}_{:06d}.png'.format(
-            opts.snapshot_base, loop_count+1, full_iteration+1)
+            opts.snapshot_prefix, loop_count+1, full_iteration+1)
     else:
         outfile = '{}{:04d}{}.png'.format(
-            opts.snapshot_base, loop_count+1, full_iteration)
+            opts.snapshot_prefix, loop_count+1, full_iteration)
         
     cur_abserr = np.abs(cur_approx - inputs.input_image)
     cur_abserr = cur_abserr * inputs.weight_image
@@ -865,24 +875,33 @@ def local_optimize(opts, inputs, models, state, sess,
 
     feed_dict = {inputs.target_tensor: cur_target}
 
-    fetches = dict(loss=models.local.loss_min,
-                   con_loss=models.local.con_loss_min,
-                   approx=models.local.approx_min,
-                   gabor=models.local.gabor_min,
-                   params=models.local.cparams_min)
+    fetches = dict(loss=models.local.loss_per_fit,
+                   con_losses=models.local.con_losses,
+                   approx=models.local.approx,
+                   gabor=models.local.gabor,
+                   params=models.local.cparams)
         
     for i in range(opts.local_iter):
         results = sess.run(models.local.train_op, feed_dict)
                          
     results = sess.run(fetches, feed_dict)
 
-    new_loss = results['loss'] + cur_con_losses
-    new_approx = results['approx']
-    new_gabor = results['gabor']
-    new_params = results['params']
-    new_con_loss = results['con_loss']
+    if is_replace and opts.lambda_loss > 0:
+        p = np.exp( -opts.lambda_loss * results['loss'] )
+        #idx0 = p.argmin()
+        #idx1 = p.argmax()
+        #print('p range is', p[idx0], p[idx1], 'corresp to', results['loss'][idx0], results['loss'][idx1])
+        fidx = sample_multinomial(p, None)
+    else:
+        fidx = results['loss'].argmin()
+
+    new_loss = results['loss'][fidx] + cur_con_losses
+    new_approx = results['approx'][fidx]
+    new_gabor = results['gabor'][fidx]
+    new_params = results['params'][fidx]
+    new_con_loss = results['con_losses'][fidx]
     
-    print('  post-refine loss is', new_loss)
+    print('  after local fit, loss is', new_loss)
 
     assert(new_params.shape == (opts.mini_ensemble_size, 8))
 
@@ -903,13 +922,17 @@ def local_optimize(opts, inputs, models, state, sess,
              opts, inputs, models, sess,
              loop_count, model_start_idx+opts.mini_ensemble_size, '')
 
-    if prev_best_loss is None or new_loss < prev_best_loss:
+    if opts.lambda_loss > 0 or prev_best_loss is None or new_loss < prev_best_loss:
 
         prev_best_loss = new_loss
 
         state.params[model_idx] = new_params
         state.gabor[model_idx] = new_gabor
         state.con_loss[model_idx] = new_con_loss
+
+    else:
+
+        print('  skipping update because solution got worse')
 
     print()
 
@@ -1053,7 +1076,8 @@ def main():
             # Done with this mini-ensemble
             model_start_idx += opts.mini_ensemble_size
 
-            if is_replace and (loop_count + 1) % opts.full_every == 0:
+            if ( model_start_idx >= opts.num_models and
+                 (loop_count + 1) % opts.full_every == 0 ):
 
                 # Do a full optimization
                 prev_best_loss = full_optimize(opts, inputs, models, state,
