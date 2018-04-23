@@ -122,9 +122,8 @@ def get_options():
                         help='maximum # of iterations per local fit',
                         default=100)
     
-    parser.add_argument('-d', '--num-delete', type=int, metavar='N',
-                        help='number of models to replace when full',
-                        default=8)
+    parser.add_argument('-F', '--full-every', type=int, metavar='N', default=8,
+                        help='perform joint optimization after every N outer loops')
 
     parser.add_argument('-f', '--full-iter', type=int, metavar='N',
                         help='maximum # of iterations for joint optimization',
@@ -137,6 +136,19 @@ def get_options():
     parser.add_argument('-R', '--full-learning-rate', type=float, metavar='R',
                         help='learning rate for full opt.',
                         default=0.001)
+
+    parser.add_argument('-P', '--perturb-amount', type=float,
+                        metavar='R', default=0.01,
+                        help='amount to perturb replacement fits by')
+
+    parser.add_argument('-c', '--copy-quantity', type=float,
+                        metavar='C',
+                        help='number or fraction of re-fits to initialize with cur. model',
+                        default=1)
+
+    parser.add_argument('-a', '--anneal-temp', type=float, metavar='T',
+                        help='temperature for simulated annealing',
+                        default=0.0)
     
     parser.add_argument('-B', '--lambda-err', type=float,
                         metavar='LAMBDA',
@@ -151,13 +163,19 @@ def get_options():
   
     opts = parser.parse_args()
 
+    if opts.copy_quantity < 0:
+        opts.copy_quantity = 0
+    elif opts.copy_quantity >= 1:
+        opts.copy_quantity = 1
+    else:
+        opts.copy_quantity = int(round(opts.copy_quantity * opts.num_local))
+
     if opts.preview_size == 0:
         opts.preview_size = 4*opts.max_size
     elif opts.preview_size < 0:
         opts.preview_size = 0
 
     assert opts.num_models % opts.mini_ensemble_size == 0
-    assert opts.num_delete % opts.mini_ensemble_size == 0
     
     return opts
 
@@ -549,6 +567,23 @@ def snapshot(cur_gabor, cur_approx,
     out_img.save(outfile)
 
 ######################################################################
+# Apply a small perturbation to the input parameters
+
+def randomize(params, rstdev, ncopy=None):
+
+    gmin = GABOR_RANGE[:,0]
+    gmax = GABOR_RANGE[:,1]
+    grng = gmax - gmin
+
+    pshape = params.shape
+    if ncopy is not None:
+        pshape = (ncopy,) + pshape
+
+    bump = np.random.normal(scale=rstdev, size=pshape)
+    
+    return params + bump*grng[None,:]
+
+######################################################################
 # Compute x/y coordinates for a grid spanning [-1, 1] for the given
 # image shape (h, w)
 
@@ -780,7 +815,7 @@ def full_optimize(opts, inputs, models, state, sess,
     snapshot(results['approx'][0],
              results['approx'][0],
              opts, inputs, models, sess,
-             loop_count, model_start_idx, opts.full_iter)
+             loop_count, model_start_idx, opts.full_iter-1)
 
     if results['loss'] < prev_best_loss:
 
@@ -799,13 +834,13 @@ def full_optimize(opts, inputs, models, state, sess,
 
 def local_optimize(opts, inputs, models, state, sess,
                    cur_approx, cur_con_losses, cur_target,
-                   model_idx, loop_count,
+                   is_replace, model_idx, loop_count,
                    model_start_idx, prev_best_loss):
 
     # Params have already been randomly initialized, but we
     # need to replace some of them here
 
-    if opts.lambda_err:
+    if is_replace or opts.lambda_err:
 
         # Get current randomly initialized values
         pvalues = sess.run(models.local.params)
@@ -815,6 +850,16 @@ def local_optimize(opts, inputs, models, state, sess,
             pvalues[:, :, :2] = sample_weighted_error(opts, inputs,
                                                            cur_target)
 
+
+        if is_replace and opts.copy_quantity:
+
+            # Load in existing model values, slightly perturbed.
+            rparams = randomize(state.params[model_idx],
+                                opts.perturb_amount,
+                                opts.copy_quantity)
+            
+            pvalues[:opts.copy_quantity] = rparams
+            
         # Update tensor with data set above
         models.local.params.load(pvalues, sess)
 
@@ -924,15 +969,16 @@ def main():
             loop_count = -1
 
             if opts.time_limit != 0 and opts.total_iterations != 0:
+                
                 prev_best_loss = full_optimize(opts, inputs, models, state,
                                                sess,
                                                loop_count,
                                                model_start_idx,
                                                prev_best_loss)
 
-            if opts.output is not None:
-                np.savetxt(opts.output, state.params,
-                           fmt='%f', delimiter=',')
+                if opts.output is not None:
+                    np.savetxt(opts.output, state.params,
+                               fmt='%f', delimiter=',')
 
             rollback_state = copy_state(state)
             rollback_loss = prev_best_loss
@@ -958,30 +1004,29 @@ def main():
             # Initialize all global vars (including optimizer-internal vars)
             sess.run(ginit)
 
-            # If we are full, randomly delete some models
-            if model_start_idx == opts.num_models:
+            # Establish starting index for models and whether to replace or not
+            is_replace = (model_start_idx >= opts.num_models)
+
+            print('at loop iteration {}, '.format(loop_count+1), end='')
+            
+            # Figure out which model(s) to replace or newly train
+            if is_replace:
                 
                 idx = np.arange(opts.num_models)
                 np.random.shuffle(idx)
 
-                state.params[:] = state.params[idx]
-                state.gabor[:] = state.gabor[idx]
-                state.con_loss[:] = state.con_loss[idx]
-
-                model_start_idx = opts.num_models - opts.num_delete
-                print('*** shuffling and deleting {} models ***\n'.format(
-                    opts.num_delete))
+                model_idx = idx[-opts.mini_ensemble_size:]
+                rest_idx = idx[:-opts.mini_ensemble_size]
                 
-                prev_best_loss = None
-
-            assert model_start_idx < opts.num_models
+                print('replacing models', model_idx)
                 
-            model_idx = np.arange(opts.mini_ensemble_size) + model_start_idx
-            rest_idx = np.arange(model_start_idx)
+            else:
                 
-            print('at loop iteration {}, '.format(loop_count+1), end='')
-            print('training models', model_idx)
-
+                model_idx = np.arange(opts.mini_ensemble_size) + model_start_idx
+                rest_idx = np.arange(model_start_idx)
+                
+                print('training models', model_idx)
+                
             # Get the current approximation (sum of all Gabor functions
             # from all models except the current ones)
             cur_approx = state.gabor[rest_idx].sum(axis=0)
@@ -1000,7 +1045,7 @@ def main():
                                             state, sess,
                                             cur_approx, cur_con_losses,
                                             cur_target,
-                                            model_idx, 
+                                            is_replace, model_idx, 
                                             loop_count,
                                             model_start_idx,
                                             prev_best_loss)
@@ -1008,7 +1053,7 @@ def main():
             # Done with this mini-ensemble
             model_start_idx += opts.mini_ensemble_size
 
-            if model_start_idx == opts.num_models:
+            if is_replace and (loop_count + 1) % opts.full_every == 0:
 
                 # Do a full optimization
                 prev_best_loss = full_optimize(opts, inputs, models, state,
