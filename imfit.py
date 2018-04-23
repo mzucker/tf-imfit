@@ -146,11 +146,6 @@ def get_options():
                         help='number or fraction of re-fits to initialize with cur. model',
                         default=0.25)
     
-    parser.add_argument('-B', '--lambda-err', type=float,
-                        metavar='LAMBDA',
-                        help='weight on Boltzmann sampling of error map',
-                        default=0.0)
-
     parser.add_argument('-a', '--anneal-temp', type=float, metavar='T',
                         help='temperature for simulated annealing',
                         default=0.1)
@@ -413,71 +408,7 @@ class GaborModel(object):
         with tf.variable_scope('imfit_optimizer'):
             self.opt = tf.train.AdamOptimizer(learning_rate=learning_rate)
             self.train_op = self.opt.minimize(self.loss)
-
-######################################################################
-# Multinomial sampling.
-            
-def sample_multinomial(p, rshape):
-
-    prefix_sum = np.cumsum(p)
-    r = np.random.random(rshape) * prefix_sum[-1]
-
-    idx = np.searchsorted(prefix_sum, r)
-    assert(idx.shape == r.shape)
     
-    return idx
-    
-######################################################################
-# Multinomial sampling of weighted error using Boltzmann-style
-# distribution
-
-def sample_weighted_error(opts, inputs, err):
-    
-    err = inputs.weight_image * err
-
-    p = opts.lambda_err*err**2
-    p = np.exp(p - p.max())
-    psum = p.sum()
-    
-    h, w = p.shape
-
-    p = p.flatten()
-
-    assert inputs.y.shape == (1, 1, h, 1)
-    assert inputs.x.shape == (1, 1, 1, w)
-
-    rshape = (opts.num_local, opts.mini_ensemble_size)
-    idx = sample_multinomial(p, rshape)
-    
-    row = idx / w
-    col = idx % w
-
-    assert row.min() >= 0 and row.max() < h
-    assert col.min() >= 0 and col.max() < w
-
-    u = inputs.x.flatten()[col]
-    v = inputs.y.flatten()[row]
-
-    uv = np.stack((u, v), axis=2)
-
-    xf = inputs.x.flatten()
-    yf = inputs.y.flatten()
-    px = xf[1] - xf[0]
-    uv += (np.random.random(uv.shape)-0.5)*px
-
-    '''
-    uv = uv.reshape((-1, 2))
-    import matplotlib.pyplot as plt
-    plt.pcolormesh(xf, yf, err)
-    plt.plot(uv[:,0], uv[:,1], 'k.', markersize=2)
-    plt.axis('equal')
-    plt.axis('off')
-    plt.show()
-    sys.exit(0)
-    '''
-
-    return uv
-
 ######################################################################
 # Rescale image to map given bounds to [0,255] uint8
 
@@ -839,25 +770,17 @@ def local_optimize(opts, inputs, models, state, sess,
     # Params have already been randomly initialized, but we
     # need to replace some of them here
 
-    if opts.lambda_err or (is_replace and opts.copy_quantity):
+    if is_replace and opts.copy_quantity:
 
         # Get current randomly initialized values
         pvalues = sess.run(models.local.params)
 
-        if opts.lambda_err:
-            # Do Boltzmann-style sampling of error for u,v
-            pvalues[:, :, :2] = sample_weighted_error(opts, inputs,
-                                                           cur_target)
+        # Load in existing model values, slightly perturbed.
+        rparams = randomize(state.params[model_idx],
+                            opts.perturb_amount,
+                            opts.copy_quantity)
 
-
-        if is_replace and opts.copy_quantity:
-
-            # Load in existing model values, slightly perturbed.
-            rparams = randomize(state.params[model_idx],
-                                opts.perturb_amount,
-                                opts.copy_quantity)
-            
-            pvalues[:opts.copy_quantity] = rparams
+        pvalues[:opts.copy_quantity] = rparams
             
         # Update tensor with data set above
         models.local.params.load(pvalues, sess)
