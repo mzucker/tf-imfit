@@ -6,6 +6,14 @@ import tensorflow as tf
 import numpy as np
 from PIL import Image
 
+ModelsTuple = namedtuple('ModelsTuple',
+                         'full, local, preview')
+
+InputsTuple = namedtuple('InputsTuple',
+                         'input_image, weight_image, '
+                         'x, y, target_tensor, max_row')
+
+StateTuple = namedtuple('StateTuple', 'params, gabor, con_loss')
 
 ######################################################################
 # Indexes of Gabor function parameters
@@ -114,8 +122,9 @@ def get_options():
                         help='maximum # of iterations per local fit',
                         default=100)
     
-    parser.add_argument('-F', '--full-every', type=int, metavar='N',
-                        help='perform joint optimization after every N outer loops')
+    parser.add_argument('-d', '--num-delete', type=int, metavar='N',
+                        help='number of models to replace when full',
+                        default=8)
 
     parser.add_argument('-f', '--full-iter', type=int, metavar='N',
                         help='maximum # of iterations for joint optimization',
@@ -125,23 +134,10 @@ def get_options():
                         help='learning rate for AdamOptimizer',
                         default=0.001)
     
-    parser.add_argument('-R', '--rstdev', type=float, metavar='R',
-                        help='amount to randomize models when re-fitting or full opt.',
-                        default=0.001)
-
     parser.add_argument('-B', '--lambda-err', type=float,
                         metavar='LAMBDA',
                         help='weight on Boltzmann sampling of error map',
                         default=2.0)
-
-    parser.add_argument('-c', '--copy-quantity', type=float,
-                        metavar='C',
-                        help='number or fraction of re-fits to initialize with cur. model',
-                        default=1)
-
-    parser.add_argument('-a', '--anneal-temp', type=float, metavar='T',
-                        help='temperature for simulated annealing',
-                        default=0.0)
     
     parser.add_argument('-S', '--label-snapshot', action='store_true',
                         help='individually label snapshots (good for anim. gif)')
@@ -151,22 +147,13 @@ def get_options():
   
     opts = parser.parse_args()
 
-    if opts.copy_quantity < 0:
-        opts.copy_quantity = 0
-    elif opts.copy_quantity >= 1:
-        opts.copy_quantity = 1
-    else:
-        opts.copy_quantity = int(round(opts.copy_quantity * opts.num_local))
-
     if opts.preview_size == 0:
         opts.preview_size = 4*opts.max_size
     elif opts.preview_size < 0:
         opts.preview_size = 0
 
     assert opts.num_models % opts.mini_ensemble_size == 0
-
-    if opts.full_every is None:
-        opts.full_every = opts.num_models / opts.mini_ensemble_size
+    assert opts.num_delete % opts.mini_ensemble_size == 0
     
     return opts
 
@@ -240,6 +227,9 @@ class GaborModel(object):
         if max_row is None:
             max_row = ensemble_size
 
+        gmin = GABOR_RANGE[:,0].reshape(1,1,GABOR_NUM_PARAMS)
+        gmax = GABOR_RANGE[:,1].reshape(1,1,GABOR_NUM_PARAMS)
+            
         # Parameter tensor could be passed in or created here
         if params is not None:
 
@@ -248,8 +238,6 @@ class GaborModel(object):
         else:
 
             if initializer is None:
-                gmin = GABOR_RANGE[:,0].reshape(1,1,GABOR_NUM_PARAMS)
-                gmax = GABOR_RANGE[:,1].reshape(1,1,GABOR_NUM_PARAMS)
                 initializer = tf.random_uniform_initializer(minval=gmin,
                                                             maxval=gmax,
                                                             dtype=tf.float32)
@@ -261,11 +249,15 @@ class GaborModel(object):
                 dtype=tf.float32,
                 initializer=initializer)
 
+        self.cparams = tf.clip_by_value(self.params[:,:max_row],
+                                        gmin, gmax,
+                                        name='cparams')
+
         ############################################################
         # Now compute the Gabor function for each fit/model
         
         # f x m x 8 x 1 x 1
-        params_bcast = self.params[:,:max_row,:,None,None]
+        params_bcast = self.cparams[:,:,:,None,None]
 
         # f x m x 1 x 1
         u = params_bcast[:,:,GABOR_PARAM_U]
@@ -328,16 +320,16 @@ class GaborModel(object):
         # Box constraints on l,t,s,h. Note we don't actually
         # enforce bounds on u,v,r,p
 
+
         box_constraints = []
-        
+
         for i  in range(GABOR_PARAM_P, GABOR_NUM_PARAMS):
             lo, hi = GABOR_RANGE[i]
-            var = self.params[:,:,i]
+            var = self.cparams[:,:,i]
             if lo != -np.pi:
                 box_constraints.append( var - lo )
             if hi != np.pi:
-                box_constraints.append( hi - var)
-
+                box_constraints.append( hi - var )
         
         # Pair-wise constraints on l, s, t:
 
@@ -361,8 +353,7 @@ class GaborModel(object):
         con_sqr = tf.minimum(self.constraints, 0)**2
 
         # f x m
-        self.con_losses = tf.reduce_sum(con_sqr, axis=2,
-                                        name='con_losses')
+        self.con_losses = tf.reduce_sum(con_sqr, axis=2, name='con_losses')
 
         # f (sum across mini-batch)
         self.con_loss_per_fit = tf.reduce_sum(self.con_losses, axis=1,
@@ -405,7 +396,7 @@ class GaborModel(object):
         self.gabor_min = self.gabor[lpf_argmin]
 
         # m x 8
-        self.params_min = self.params[lpf_argmin]
+        self.cparams_min = self.cparams[lpf_argmin]
 
         # scalars
         self.err_loss = tf.reduce_mean(self.err_loss_per_fit, name='err_loss')
@@ -524,10 +515,19 @@ def snapshot(cur_gabor, cur_approx,
 
         max_rowval = min(model_start_idx, opts.num_models)
 
-        fetches = models.preview.approx
         feed_dict = { inputs.max_row: max_rowval }
 
-        preview_image = sess.run(fetches, feed_dict)[0]
+        pparams = sess.run(models.preview.params)
+        preview_image = sess.run(models.preview.approx, feed_dict)[0]
+        pgabors = sess.run(models.preview.gabor, feed_dict).sum(axis=(0,2,3))
+        
+        if np.any(np.isnan(preview_image)):
+            print(preview_image)
+            print(pparams[:max_rowval])
+            print('# params:', np.isnan(pparams[:max_rowval]).sum())
+            print(np.isnan(pgabors))
+            assert not np.any(np.isnan(preview_image))
+        assert not np.all(preview_image == 0)
         preview_image = rescale(preview_image, -1, 1)
 
         max_width = max(preview_image.shape[1], out_img.shape[1])
@@ -540,23 +540,6 @@ def snapshot(cur_gabor, cur_approx,
     out_img = Image.fromarray(out_img, 'L')
 
     out_img.save(outfile)
-
-######################################################################
-# Apply a small perturbation to the input parameters
-
-def randomize(params, rstdev, ncopy=None):
-
-    gmin = GABOR_RANGE[:,0]
-    gmax = GABOR_RANGE[:,1]
-    grng = gmax - gmin
-
-    pshape = params.shape
-    if ncopy is not None:
-        pshape = (ncopy,) + pshape
-
-    bump = np.random.normal(scale=rstdev, size=pshape)
-    
-    return params + bump*grng[None,:]    
 
 ######################################################################
 # Compute x/y coordinates for a grid spanning [-1, 1] for the given
@@ -582,10 +565,6 @@ def normalized_grid(shape):
 # Set up all of the tensorflow inputs to our models
 
 def setup_inputs(opts):
-
-    InputsTuple = namedtuple('InputsTuple',
-                             'input_image, weight_image, '
-                             'x, y, target_tensor, max_row')
 
     input_image = open_grayscale(opts.image, opts.max_size)
 
@@ -619,9 +598,6 @@ def setup_inputs(opts):
 # each combination of inputs/dimensions to optimize.
 
 def setup_models(opts, inputs):
-
-    ModelsTuple = namedtuple('ModelsTuple',
-                             'full, local, preview')
     
     weight_tensor = tf.constant(inputs.weight_image)
 
@@ -728,9 +704,6 @@ def load_params(opts, inputs, models, state, sess):
 # losses that need to persist across loops.
 
 def setup_state(opts, inputs):
-
-    StateTuple = namedtuple('StateTuple',
-                            'params, gabor, con_loss')
     
     state = StateTuple(
         
@@ -747,6 +720,12 @@ def setup_state(opts, inputs):
     return state
 
 ######################################################################
+# Perform a deep copy of a state
+
+def copy_state(state):
+    return StateTuple(*[x.copy() for x in state])
+
+######################################################################
 # Perform an optimization on the full joint model (expensive/slow).
 
 def full_optimize(opts, inputs, models, state, sess,
@@ -754,11 +733,10 @@ def full_optimize(opts, inputs, models, state, sess,
                   model_start_idx,
                   prev_best_loss):
 
-    print('performing full optimization!')
+    print('performing full optimization')
     print('  previous best loss was {}'.format(prev_best_loss))
 
-    rparams = randomize(state.params, opts.rstdev)
-    models.full.params.load(rparams[None,:,:], sess)
+    models.full.params.load(state.params[None,:], sess)
 
     max_rowval = min(model_start_idx, opts.num_models)
 
@@ -767,7 +745,7 @@ def full_optimize(opts, inputs, models, state, sess,
 
     fetches = dict(gabor=models.full.gabor,
                    approx=models.full.approx,
-                   params=models.full.params,
+                   params=models.full.cparams,
                    loss=models.full.loss,
                    train_op=models.full.train_op,
                    con_losses=models.full.con_losses)
@@ -799,9 +777,9 @@ def full_optimize(opts, inputs, models, state, sess,
 
     if results['loss'] < prev_best_loss:
 
-        state.params[:max_rowval] = results['params'][0,:max_rowval]
+        state.params[:max_rowval] = results['params'][0]
         state.gabor[:max_rowval] = results['gabor'][0]
-        state.con_loss[:max_rowval] = results['con_losses'][0, :max_rowval]
+        state.con_loss[:max_rowval] = results['con_losses'][0]
         prev_best_loss = results['loss']
 
         if opts.output is not None:
@@ -818,15 +796,14 @@ def full_optimize(opts, inputs, models, state, sess,
 # parallel.
 
 def local_optimize(opts, inputs, models, state, sess,
-                      cur_approx, cur_con_losses, cur_target,
-                      is_replace, model_idx, loop_count,
-                      model_start_idx, prev_best_loss):
+                   cur_approx, cur_con_losses, cur_target,
+                   model_idx, loop_count,
+                   model_start_idx, prev_best_loss):
 
     # Params have already been randomly initialized, but we
     # need to replace some of them here
-    set_pvalues = is_replace or opts.lambda_err
 
-    if set_pvalues:
+    if opts.lambda_err:
 
         # Get current randomly initialized values
         pvalues = sess.run(models.local.params)
@@ -835,14 +812,6 @@ def local_optimize(opts, inputs, models, state, sess,
             # Do Boltzmann-style sampling of error for u,v
             pvalues[:, :, :2] = sample_weighted_error(opts, inputs,
                                                            cur_target)
-
-        if is_replace and opts.copy_quantity:
-
-            # Load in existing model values, slightly perturbed.
-            rparams = randomize(state.params[model_idx], opts.rstdev,
-                                opts.copy_quantity)
-            
-            pvalues[:opts.copy_quantity] = rparams
 
         # Update tensor with data set above
         models.local.params.load(pvalues, sess)
@@ -853,7 +822,7 @@ def local_optimize(opts, inputs, models, state, sess,
                    con_loss=models.local.con_loss_min,
                    approx=models.local.approx_min,
                    gabor=models.local.gabor_min,
-                   params=models.local.params_min)
+                   params=models.local.cparams_min)
         
     for i in range(opts.local_iter):
         results = sess.run(models.local.train_op, feed_dict)
@@ -872,45 +841,29 @@ def local_optimize(opts, inputs, models, state, sess,
 
     assert(new_con_loss.shape == (opts.mini_ensemble_size,))
 
-    assert(new_gabor.shape == (opts.mini_ensemble_size,) + inputs.input_image.shape)
+    assert(new_gabor.shape ==
+           (opts.mini_ensemble_size,) + inputs.input_image.shape)
 
     assert(new_approx.shape == inputs.input_image.shape)
     
     if opts.preview_size:
-        models.full.params.load(state.params[None,:,:], sess)
+        tmpparams = state.params.copy()
+        tmpparams[model_idx] = new_params
+        models.full.params.load(tmpparams[None,:], sess)
 
     snapshot(new_approx,
              cur_approx + new_approx,
              opts, inputs, models, sess,
-             loop_count, model_start_idx, '')
+             loop_count, model_start_idx+opts.mini_ensemble_size, '')
 
-
-    do_update = True
-
-    if is_replace and new_loss > prev_best_loss:
-
-        rel_change = (prev_best_loss - new_loss) / prev_best_loss
-
-        if not opts.anneal_temp:
-            print('  not better than', prev_best_loss, 'skipping update')
-            do_update = False
-        else:
-            p_accept = np.exp(rel_change / opts.anneal_temp)
-            r = np.random.random()
-            do_update = (r < p_accept)
-            if do_update:
-                print('  accepting relative increase of {}'.format(-rel_change))
-            else:
-                print('  rejecting relative increase of {}'.format(-rel_change))
-
-    if do_update:
+    if prev_best_loss is None or new_loss < prev_best_loss:
 
         if opts.output is not None:
             np.savetxt(opts.output,
                        state.params[:min(model_start_idx, opts.num_models)],
                        fmt='%f', delimiter=',')
 
-            prev_best_loss = new_loss
+        prev_best_loss = new_loss
 
         state.params[model_idx] = new_params
         state.gabor[model_idx] = new_gabor
@@ -936,6 +889,9 @@ def main():
 
     prev_best_loss = None
     model_start_idx = 0
+
+    rollback_state = None
+    rollback_loss = None
 
     ############################################################
     # Finalize the graph before doing anything with a tf.Session() -
@@ -1004,28 +960,29 @@ def main():
             # Initialize all global vars (including optimizer-internal vars)
             sess.run(ginit)
 
-            # Establish starting index for models and whether to replace or not
-            is_replace = (model_start_idx >= opts.num_models)
-
-            print('at loop iteration {}, '.format(loop_count+1), end='')
-            
-            # Figure out which model(s) to replace or newly train
-            if is_replace:
+            # If we are full, randomly delete some models
+            if model_start_idx == opts.num_models:
                 
                 idx = np.arange(opts.num_models)
                 np.random.shuffle(idx)
 
-                model_idx = idx[-opts.mini_ensemble_size:]
-                rest_idx = idx[:-opts.mini_ensemble_size]
+                state.params[:] = state.params[idx]
+                state.gabor[:] = state.gabor[idx]
+                state.con_loss[:] = state.con_loss[idx]
+
+                model_start_idx = opts.num_models - opts.num_delete
+                print('*** shuffling and deleting {} models ***\n'.format(
+                    opts.num_delete))
                 
-                print('replacing models', model_idx)
+                prev_best_loss = None
+
+            assert model_start_idx < opts.num_models
                 
-            else:
+            model_idx = np.arange(opts.mini_ensemble_size) + model_start_idx
+            rest_idx = np.arange(model_start_idx)
                 
-                model_idx = np.arange(opts.mini_ensemble_size) + model_start_idx
-                rest_idx = np.arange(model_start_idx)
-                
-                print('training models', model_idx)
+            print('at loop iteration {}, '.format(loop_count+1), end='')
+            print('training models', model_idx)
 
             # Get the current approximation (sum of all Gabor functions
             # from all models except the current ones)
@@ -1045,22 +1002,39 @@ def main():
                                             state, sess,
                                             cur_approx, cur_con_losses,
                                             cur_target,
-                                            is_replace, model_idx, 
+                                            model_idx, 
                                             loop_count,
                                             model_start_idx,
                                             prev_best_loss)
 
             # Done with this mini-ensemble
             model_start_idx += opts.mini_ensemble_size
-            
-            # See if it's time to  do a full optimization
-            if (loop_count+1) % opts.full_every == 0:
+
+            if model_start_idx == opts.num_models:
+
+                # Do a full optimization
                 prev_best_loss = full_optimize(opts, inputs, models, state,
                                                sess,
                                                loop_count,
                                                model_start_idx,
                                                prev_best_loss)
-
+                
+                if rollback_loss is None or prev_best_loss <= rollback_loss:
+                    rollback_loss = prev_best_loss
+                    rollback_state = copy_state(state)
+                    print('current loss of {} is best so far!\n'.format(
+                        rollback_loss))
+                else:
+                    print('cur. loss of {} is not better than prev. {}, rolling back!!!\n'.format(
+                        prev_best_loss, rollback_loss))
+                    prev_best_loss = rollback_loss
+                    state = copy_state(rollback_state)
+                    if opts.output is not None:
+                        np.savetxt(opts.output,
+                                   state.params,
+                                   fmt='%f', delimiter=',')
+                    
+                
             # Finished with this loop iteration
             loop_count += 1
             
