@@ -749,7 +749,8 @@ def load_params(opts, inputs, models, state, sess):
     
     snapshot(cur_gabor, cur_gabor, opts, inputs, models, sess, -1, nparams, '')
     
-    print('current loss is {}'.format(prev_best_loss))
+    print('initial loss is {}'.format(prev_best_loss))
+    print()
 
     model_start_idx = nparams
 
@@ -787,10 +788,13 @@ def copy_state(state):
 def full_optimize(opts, inputs, models, state, sess,
                   loop_count,
                   model_start_idx,
-                  prev_best_loss):
+                  prev_best_loss,
+                  rollback_loss):
 
     print('performing full optimization')
-    print('  previous best loss was {}'.format(prev_best_loss))
+
+    if rollback_loss is not None:
+        print('  best prev full loss is {}'.format(rollback_loss))
 
     models.full.params.load(state.params[None,:], sess)
 
@@ -1018,7 +1022,8 @@ def main():
                                                sess,
                                                loop_count,
                                                model_start_idx,
-                                               prev_best_loss)
+                                               prev_best_loss,
+                                               rollback_loss)
 
                 if opts.output is not None:
                     np.savetxt(opts.output, state.params,
@@ -1105,7 +1110,8 @@ def main():
                                                sess,
                                                loop_count,
                                                model_start_idx,
-                                               prev_best_loss)
+                                               prev_best_loss,
+                                               rollback_loss)
                 
                 if rollback_loss is None or prev_best_loss <= rollback_loss:
                     rollback_loss = prev_best_loss
