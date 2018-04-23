@@ -155,7 +155,11 @@ def get_options():
                         metavar='LAMBDA',
                         help='weight on Boltzmann sampling of error map',
                         default=2.0)
-    
+
+    parser.add_argument('-a', '--anneal-temp', type=float, metavar='T',
+                        help='temperature for simulated annealing',
+                        default=0.0)
+        
     parser.add_argument('-S', '--label-snapshot', action='store_true',
                         help='individually label snapshots (good for anim. gif)')
  
@@ -922,7 +926,27 @@ def local_optimize(opts, inputs, models, state, sess,
              opts, inputs, models, sess,
              loop_count, model_start_idx+opts.mini_ensemble_size, '')
 
-    if opts.lambda_loss > 0 or prev_best_loss is None or new_loss < prev_best_loss:
+    if prev_best_loss is None or new_loss < prev_best_loss:
+        
+        do_update = True
+        
+    else:
+
+        rel_change = (prev_best_loss - new_loss) / prev_best_loss
+
+        if not opts.anneal_temp:
+            print('  not better than', prev_best_loss, 'skipping update')
+            do_update = False
+        else:
+            p_accept = np.exp(rel_change / opts.anneal_temp)
+            r = np.random.random()
+            do_update = (r < p_accept)
+            if do_update:
+                print('  accepting relative increase of {}'.format(-rel_change))
+            else:
+                print('  rejecting relative increase of {}'.format(-rel_change))
+    
+    if do_update:
 
         prev_best_loss = new_loss
 
@@ -930,9 +954,6 @@ def local_optimize(opts, inputs, models, state, sess,
         state.gabor[model_idx] = new_gabor
         state.con_loss[model_idx] = new_con_loss
 
-    else:
-
-        print('  skipping update because solution got worse')
 
     print()
 
