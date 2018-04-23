@@ -148,7 +148,7 @@ def get_options():
     
     parser.add_argument('-a', '--anneal-temp', type=float, metavar='T',
                         help='temperature for simulated annealing',
-                        default=0.04)
+                        default=0.08)
         
     parser.add_argument('-S', '--label-snapshot', action='store_true',
                         help='individually label snapshots (good for anim. gif)')
