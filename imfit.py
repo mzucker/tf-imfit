@@ -145,11 +145,6 @@ def get_options():
                         metavar='C',
                         help='number or fraction of re-fits to initialize with cur. model',
                         default=0.5)
-
-    parser.add_argument('-b', '--lambda-loss', type=float,
-                        metavar='LAMBDA',
-                        help='weight on Boltzmann sampling of local fit loss',
-                        default=0.0)
     
     parser.add_argument('-B', '--lambda-err', type=float,
                         metavar='LAMBDA',
@@ -409,24 +404,6 @@ class GaborModel(object):
         self.loss_per_fit = tf.add(self.con_loss_per_fit,
                                    self.err_loss_per_fit,
                                    name='loss_per_fit')
-
-        lpf_argmin = tf.argmin(self.loss_per_fit)
-
-        
-        # scalar
-        self.loss_min = self.loss_per_fit[lpf_argmin]
-
-        # m
-        self.con_loss_min = self.con_losses[lpf_argmin]
-
-        # h x w
-        self.approx_min = self.approx[lpf_argmin]
-
-        # m x h x w
-        self.gabor_min = self.gabor[lpf_argmin]
-
-        # m x 8
-        self.cparams_min = self.cparams[lpf_argmin]
 
         # scalars
         self.err_loss = tf.reduce_mean(self.err_loss_per_fit, name='err_loss')
@@ -792,7 +769,8 @@ def full_optimize(opts, inputs, models, state, sess,
                   rollback_loss):
 
     print('performing full optimization')
-
+    print('  before full opt, loss: {}'.format(prev_best_loss))
+    
     if rollback_loss is not None:
         print('  best prev full loss is {}'.format(rollback_loss))
 
@@ -855,6 +833,9 @@ def local_optimize(opts, inputs, models, state, sess,
                    is_replace, model_idx, loop_count,
                    model_start_idx, prev_best_loss):
 
+    if prev_best_loss is not None:
+        print('  loss before local fit is', prev_best_loss)
+        
     # Params have already been randomly initialized, but we
     # need to replace some of them here
 
@@ -894,14 +875,7 @@ def local_optimize(opts, inputs, models, state, sess,
                          
     results = sess.run(fetches, feed_dict)
 
-    if is_replace and opts.lambda_loss > 0:
-        p = np.exp( -opts.lambda_loss * results['loss'] )
-        #idx0 = p.argmin()
-        #idx1 = p.argmax()
-        #print('p range is', p[idx0], p[idx1], 'corresp to', results['loss'][idx0], results['loss'][idx1])
-        fidx = sample_multinomial(p, None)
-    else:
-        fidx = results['loss'].argmin()
+    fidx = results['loss'].argmin()
 
     new_loss = results['loss'][fidx] + cur_con_losses
     new_approx = results['approx'][fidx]
@@ -945,10 +919,9 @@ def local_optimize(opts, inputs, models, state, sess,
             p_accept = np.exp(rel_change / opts.anneal_temp)
             r = np.random.random()
             do_update = (r < p_accept)
-            if do_update:
-                print('  accepting relative increase of {}'.format(-rel_change))
-            else:
-                print('  rejecting relative increase of {}'.format(-rel_change))
+            action = 'accepting' if do_update else 'rejecting'
+            print('  {} relative increase of {}, p={}'.format(
+                action, -rel_change, p_accept))
     
     if do_update:
 
