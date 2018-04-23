@@ -138,13 +138,13 @@ def get_options():
                         default=0.001)
 
     parser.add_argument('-P', '--perturb-amount', type=float,
-                        metavar='R', default=0.01,
+                        metavar='R', default=0.1,
                         help='amount to perturb replacement fits by')
 
     parser.add_argument('-c', '--copy-quantity', type=float,
                         metavar='C',
                         help='number or fraction of re-fits to initialize with cur. model',
-                        default=0.5)
+                        default=0.25)
     
     parser.add_argument('-B', '--lambda-err', type=float,
                         metavar='LAMBDA',
@@ -153,7 +153,7 @@ def get_options():
 
     parser.add_argument('-a', '--anneal-temp', type=float, metavar='T',
                         help='temperature for simulated annealing',
-                        default=0.0)
+                        default=0.1)
         
     parser.add_argument('-S', '--label-snapshot', action='store_true',
                         help='individually label snapshots (good for anim. gif)')
