@@ -149,7 +149,7 @@ def get_options():
     parser.add_argument('-B', '--lambda-err', type=float,
                         metavar='LAMBDA',
                         help='weight on Boltzmann sampling of error map',
-                        default=2.0)
+                        default=0.0)
 
     parser.add_argument('-a', '--anneal-temp', type=float, metavar='T',
                         help='temperature for simulated annealing',
@@ -839,7 +839,7 @@ def local_optimize(opts, inputs, models, state, sess,
     # Params have already been randomly initialized, but we
     # need to replace some of them here
 
-    if is_replace or opts.lambda_err:
+    if opts.lambda_err or (is_replace and opts.copy_quantity):
 
         # Get current randomly initialized values
         pvalues = sess.run(models.local.params)
