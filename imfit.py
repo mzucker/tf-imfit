@@ -148,7 +148,7 @@ def get_options():
     
     parser.add_argument('-a', '--anneal-temp', type=float, metavar='T',
                         help='temperature for simulated annealing',
-                        default=0.08)
+                        default=0.04)
         
     parser.add_argument('-S', '--label-snapshot', action='store_true',
                         help='individually label snapshots (good for anim. gif)')
@@ -700,10 +700,11 @@ def full_optimize(opts, inputs, models, state, sess,
                   rollback_loss):
 
     print('performing full optimization')
-    print('  before full opt, loss: {}'.format(prev_best_loss))
-    
+
     if rollback_loss is not None:
         print('  best prev full loss is {}'.format(rollback_loss))
+    
+    print('  before full opt, loss: {}'.format(prev_best_loss))
 
     models.full.params.load(state.params[None,:], sess)
 
