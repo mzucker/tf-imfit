@@ -67,45 +67,14 @@ def get_options():
                         metavar='IMAGE.png',
                         help='image to approximate')
 
-    parser.add_argument('-t', '--time-limit', type=parse_duration,
-                        metavar='LIMIT',
-                        help='time limit (e.g. 1:30 or 1h30m)',
-                        default=None)
-
-    parser.add_argument('-T', '--total-iterations', type=int,
-                        metavar='N',
-                        help='total limit on outer loop iterations',
-                        default=None)
-
-    parser.add_argument('-n', '--num-models', type=int, metavar='N',
-                        help='number of models to fit',
-                        default=128)
-
-    parser.add_argument('-p', '--num-parallel', type=int, metavar='N',
-                        help='number of random guesses per model',
-                        default=200)
-
-    parser.add_argument('-m', '--max-iter', type=int, metavar='N',
-                        help='maximum # of iterations per trial fit',
-                        default=100)
-
-
-    parser.add_argument('-r', '--refine', type=int, metavar='N',
-                        help='maximum # of iterations for final fit',
-                        default=500)
-
-    parser.add_argument('-R', '--rstdev', type=float, metavar='R',
-                        help='amount to randomize models when re-fitting',
-                        default=0.001)
-
-    parser.add_argument('-l', '--learning-rate', type=float, metavar='R',
-                        help='learning rate for AdamOptimizer',
-                        default=0.001)
-
     parser.add_argument('-s', '--max-size', type=int, metavar='N',
                         help='maximum size of image to load',
                         default=128)
 
+    parser.add_argument('-p', '--preview-size', type=int, metavar='N',
+                        default=0,
+                        help='size of preview image (<0 to disable)')
+    
     parser.add_argument('-w', '--weights', type=argparse.FileType('r'),
                         metavar='WEIGHTS.png',
                         help='load weights from file',
@@ -118,43 +87,87 @@ def get_options():
     parser.add_argument('-o', '--output', type=str,
                         metavar='PARAMFILE.txt',
                         help='write input params to file')
+    
+    parser.add_argument('-t', '--time-limit', type=parse_duration,
+                        metavar='LIMIT',
+                        help='time limit (e.g. 1:30 or 1h30m)',
+                        default=None)
 
-    parser.add_argument('-L', '--lambda-err', type=float,
-                        metavar='LAMBDA',
-                        help='weight on multinomial sampling of error map',
-                        default=2.0)
+    parser.add_argument('-T', '--total-iterations', type=int,
+                        metavar='N',
+                        help='total limit on outer loop iterations',
+                        default=None)
+
+    parser.add_argument('-n', '--num-models', type=int, metavar='N',
+                        help='total number of models to fit',
+                        default=128)
+ 
+    parser.add_argument('-e', '--mini-ensemble-size', type=int, metavar='N',
+                        help='models to update per local fit',
+                        default=1)
+   
+    parser.add_argument('-L', '--num-local', type=int, metavar='N',
+                        help='number of random guesses per local fit',
+                        default=200)
+
+    parser.add_argument('-l', '--local-iter', type=int, metavar='N',
+                        help='maximum # of iterations per local fit',
+                        default=100)
     
     parser.add_argument('-F', '--full-every', type=int, metavar='N',
-                        help='perform joint optimization after every N models')
+                        help='perform joint optimization after every N outer loops')
 
     parser.add_argument('-f', '--full-iter', type=int, metavar='N',
                         help='maximum # of iterations for joint optimization',
                         default=10000)
+    
+    parser.add_argument('-r', '--learning-rate', type=float, metavar='R',
+                        help='learning rate for AdamOptimizer',
+                        default=0.001)
+    
+    parser.add_argument('-R', '--rstdev', type=float, metavar='R',
+                        help='amount to randomize models when re-fitting or full opt.',
+                        default=0.001)
 
-    parser.add_argument('-S', '--label-snapshot', action='store_true',
-                        help='individually labeled snapshot images')
+    parser.add_argument('-B', '--lambda-err', type=float,
+                        metavar='LAMBDA',
+                        help='weight on Boltzmann sampling of error map',
+                        default=2.0)
 
-    parser.add_argument('-e', '--mini-ensemble-size', type=int, metavar='N',
-                        help='models to update per iteration',
+    parser.add_argument('-c', '--copy-quantity', type=float,
+                        metavar='C',
+                        help='number or fraction of re-fits to initialize with cur. model',
                         default=1)
 
-    parser.add_argument('-P', '--preview-size', type=int, metavar='N',
-                        default=0,
-                        help='size of preview image (<0 to disable)')
+    parser.add_argument('-a', '--anneal-temp', type=float, metavar='T',
+                        help='temperature for simulated annealing',
+                        default=0.0)
     
+    parser.add_argument('-S', '--label-snapshot', action='store_true',
+                        help='individually label snapshots (good for anim. gif)')
+ 
+    parser.add_argument('-b', '--snapshot-base', type=str, metavar='BASENAME',
+                        help='base name for snapshots', default='out')
+  
     opts = parser.parse_args()
 
-    if opts.full_every is None:
-        opts.full_every = opts.num_models
+    if opts.copy_quantity < 0:
+        opts.copy_quantity = 0
+    elif opts.copy_quantity >= 1:
+        opts.copy_quantity = 1
+    else:
+        opts.copy_quantity = int(round(opts.copy_quantity * opts.num_local))
 
     if opts.preview_size == 0:
         opts.preview_size = 4*opts.max_size
     elif opts.preview_size < 0:
         opts.preview_size = 0
-        
+
     assert opts.num_models % opts.mini_ensemble_size == 0
-    assert opts.full_every % opts.mini_ensemble_size == 0 
-       
+
+    if opts.full_every is None:
+        opts.full_every = opts.num_models / opts.mini_ensemble_size
+    
     return opts
 
 ######################################################################
@@ -348,16 +361,12 @@ class GaborModel(object):
         con_sqr = tf.minimum(self.constraints, 0)**2
 
         # f x m
-        self.con_loss_all = tf.reduce_sum(con_sqr, axis=2,
-                                          name='con_loss_all')
+        self.con_losses = tf.reduce_sum(con_sqr, axis=2,
+                                        name='con_losses')
 
-        # f
-        self.con_loss_per_fit = tf.reduce_sum(self.con_loss_all, axis=1,
-                                            name='con_loss_per_fit')
-
-        # m
-        self.con_loss_per_batch = tf.reduce_mean(self.con_loss_all, axis=0,
-                                               name='con_loss_per_batch')
+        # f (sum across mini-batch)
+        self.con_loss_per_fit = tf.reduce_sum(self.con_losses, axis=1,
+                                              name='con_loss_per_fit')
 
         ############################################################
         # Compute loss for approximation error
@@ -368,7 +377,7 @@ class GaborModel(object):
 
         err_sqr = 0.5*self.err**2
 
-        # f
+        # f (average across h/w)
         self.err_loss_per_fit = tf.reduce_mean(err_sqr, axis=(1,2),
                                                name='err_loss_per_fit')
 
@@ -382,8 +391,18 @@ class GaborModel(object):
 
         lpf_argmin = tf.argmin(self.loss_per_fit)
 
+        
         # scalar
-        self.losses_min = self.loss_per_fit[lpf_argmin]
+        self.loss_min = self.loss_per_fit[lpf_argmin]
+
+        # m
+        self.con_loss_min = self.con_losses[lpf_argmin]
+
+        # h x w
+        self.approx_min = self.approx[lpf_argmin]
+
+        # m x h x w
+        self.gabor_min = self.gabor[lpf_argmin]
 
         # m x 8
         self.params_min = self.params[lpf_argmin]
@@ -417,7 +436,7 @@ def sample_weighted_error(opts, inputs, err):
     assert inputs.x.shape == (1, 1, 1, w)
 
     prefix_sum = np.cumsum(p)
-    rshape = (opts.num_parallel, opts.mini_ensemble_size)
+    rshape = (opts.num_local, opts.mini_ensemble_size)
     r = np.random.random(rshape) * prefix_sum[-1]
 
     idx = np.searchsorted(prefix_sum, r)
@@ -435,8 +454,20 @@ def sample_weighted_error(opts, inputs, err):
     uv = np.stack((u, v), axis=2)
 
     xf = inputs.x.flatten()
+    yf = inputs.y.flatten()
     px = xf[1] - xf[0]
     uv += (np.random.random(uv.shape)-0.5)*px
+
+    '''
+    uv = uv.reshape((-1, 2))
+    import matplotlib.pyplot as plt
+    plt.pcolormesh(xf, yf, err)
+    plt.plot(uv[:,0], uv[:,1], 'k.', markersize=2)
+    plt.axis('equal')
+    plt.axis('off')
+    plt.show()
+    sys.exit(0)
+    '''
 
     return uv
 
@@ -469,16 +500,18 @@ def pad_right(img, width):
 
 def snapshot(cur_gabor, cur_approx,
              opts, inputs, models, sess,
-             iteration, full_iteration):
+             loop_count, model_start_idx,
+             full_iteration):
 
     if not opts.label_snapshot:
-        outfile = 'out.png'
-    elif full_iteration is None:
-        outfile = 'out{:04d}_single.png'.format(iteration+1)
+        outfile = '{}.png'.format(opts.snapshot_base)
+    elif isinstance(full_iteration, int):
+        outfile = '{}{:04d}_{:06d}.png'.format(
+            opts.snapshot_base, loop_count+1, full_iteration+1)
     else:
-        outfile = 'out{:04d}_{:06d}.png'.format(
-            iteration+1, full_iteration+1)
-
+        outfile = '{}{:04d}{}.png'.format(
+            opts.snapshot_base, loop_count+1, full_iteration)
+        
     cur_abserr = np.abs(cur_approx - inputs.input_image)
     cur_abserr = cur_abserr * inputs.weight_image
 
@@ -489,7 +522,7 @@ def snapshot(cur_gabor, cur_approx,
 
     if opts.preview_size:
 
-        max_rowval = min(iteration, opts.num_models)
+        max_rowval = min(model_start_idx, opts.num_models)
 
         fetches = models.preview.approx
         feed_dict = { inputs.max_row: max_rowval }
@@ -511,13 +544,17 @@ def snapshot(cur_gabor, cur_approx,
 ######################################################################
 # Apply a small perturbation to the input parameters
 
-def randomize(params, rstdev):
+def randomize(params, rstdev, ncopy=None):
 
     gmin = GABOR_RANGE[:,0]
     gmax = GABOR_RANGE[:,1]
     grng = gmax - gmin
 
-    bump = np.random.normal(scale=rstdev, size=params.shape)
+    pshape = params.shape
+    if ncopy is not None:
+        pshape = (ncopy,) + pshape
+
+    bump = np.random.normal(scale=rstdev, size=pshape)
     
     return params + bump*grng[None,:]    
 
@@ -584,7 +621,7 @@ def setup_inputs(opts):
 def setup_models(opts, inputs):
 
     ModelsTuple = namedtuple('ModelsTuple',
-                             'full, par_mini, one_mini, preview')
+                             'full, local, preview')
     
     weight_tensor = tf.constant(inputs.weight_image)
 
@@ -601,21 +638,13 @@ def setup_models(opts, inputs):
                           max_row = inputs.max_row,
                           initializer=tf.zeros_initializer())
     
-    with tf.variable_scope('par_mini'):
+    with tf.variable_scope('local'):
         
-        par_mini = GaborModel(x_tensor, y_tensor,
-                              (opts.num_parallel, opts.mini_ensemble_size),
-                              weight_tensor,
-                              inputs.target_tensor,
-                              learning_rate=opts.learning_rate)
-        
-    with tf.variable_scope('one_mini'):
-        
-        one_mini = GaborModel(x_tensor, y_tensor,
-                              (1, opts.mini_ensemble_size),
-                              weight_tensor,
-                              inputs.target_tensor,
-                              learning_rate=opts.learning_rate)
+        local = GaborModel(x_tensor, y_tensor,
+                           (opts.num_local, opts.mini_ensemble_size),
+                           weight_tensor,
+                           inputs.target_tensor,
+                           learning_rate=opts.learning_rate)
         
 
     if opts.preview_size:
@@ -637,7 +666,7 @@ def setup_models(opts, inputs):
 
         preview = None
 
-    return ModelsTuple(full, par_mini, one_mini, preview)
+    return ModelsTuple(full, local, preview)
 
 ######################################################################
 # Load weights from file.
@@ -668,15 +697,16 @@ def load_params(opts, inputs, models, state, sess):
     fetches = dict(gabor=models.full.gabor,
                    approx=models.full.approx,
                    err_loss=models.full.err_loss,
-                   con_losses=models.full.con_loss_per_batch)
+                   loss=models.full.loss,
+                   con_losses=models.full.con_losses)
 
     feed_dict = {inputs.target_tensor: inputs.input_image,
                  inputs.max_row: nparams}
 
     results = sess.run(fetches, feed_dict)
 
-    state.approx[:nparams] = results['gabor'][0, :nparams]
-    state.con_loss[:nparams] = results['con_losses'][:nparams]
+    state.gabor[:nparams] = results['gabor'][0, :nparams]
+    state.con_loss[:nparams] = results['con_losses'][0, :nparams]
 
     prev_best_loss = results['err_loss'] + state.con_loss[:nparams].sum()
 
@@ -685,13 +715,13 @@ def load_params(opts, inputs, models, state, sess):
     if opts.preview_size:
         models.full.params.load(state.params[None,:])
     
-    snapshot(cur_gabor, cur_gabor, opts, inputs, models, sess, nparams, 0)
+    snapshot(cur_gabor, cur_gabor, opts, inputs, models, sess, -1, nparams, '')
     
     print('current loss is {}'.format(prev_best_loss))
 
-    iteration = nparams
+    model_start_idx = nparams
 
-    return prev_best_loss, iteration
+    return prev_best_loss, model_start_idx
 
 ######################################################################
 # Set up state variables to record weights, Gabor approximations, &
@@ -699,16 +729,17 @@ def load_params(opts, inputs, models, state, sess):
 
 def setup_state(opts, inputs):
 
-    StateTuple = namedtuple('StateTuple', 'params, approx, con_loss')
+    StateTuple = namedtuple('StateTuple',
+                            'params, gabor, con_loss')
     
     state = StateTuple(
         
         params=np.zeros((opts.num_models, GABOR_NUM_PARAMS),
                         dtype=np.float32),
         
-        approx=np.zeros((opts.num_models,) + inputs.input_image.shape,
-                        dtype=np.float32),
-        
+        gabor=np.zeros((opts.num_models,) + inputs.input_image.shape,
+                       dtype=np.float32),
+
         con_loss=np.zeros(opts.num_models, dtype=np.float32)
 
     )
@@ -719,7 +750,9 @@ def setup_state(opts, inputs):
 # Perform an optimization on the full joint model (expensive/slow).
 
 def full_optimize(opts, inputs, models, state, sess,
-                  prev_best_loss, iteration):
+                  loop_count,
+                  model_start_idx,
+                  prev_best_loss):
 
     print('performing full optimization!')
     print('  previous best loss was {}'.format(prev_best_loss))
@@ -727,21 +760,25 @@ def full_optimize(opts, inputs, models, state, sess,
     rparams = randomize(state.params, opts.rstdev)
     models.full.params.load(rparams[None,:,:], sess)
 
-    feed_dict = {inputs.target_tensor: inputs.input_image,
-                 inputs.max_row: opts.num_models}
+    max_rowval = min(model_start_idx, opts.num_models)
+
+    feed_dict = { inputs.target_tensor: inputs.input_image,
+                  inputs.max_row: max_rowval }
 
     fetches = dict(gabor=models.full.gabor,
                    approx=models.full.approx,
                    params=models.full.params,
                    loss=models.full.loss,
                    train_op=models.full.train_op,
-                   con_losses=models.full.con_loss_per_batch)
+                   con_losses=models.full.con_losses)
 
     for i in range(opts.full_iter):
 
-        results = sess.run(fetches, feed_dict)
+        sess.run(models.full.train_op, feed_dict)
 
         if ((i+1) % 1000 == 0 and (i+1) < opts.full_iter):
+
+            results = sess.run(fetches, feed_dict)
 
             print('  loss at iter {:6d} is {}'.format(
                 i+1, results['loss']))
@@ -749,24 +786,27 @@ def full_optimize(opts, inputs, models, state, sess,
             snapshot(results['approx'][0],
                      results['approx'][0],
                      opts, inputs, models, sess,
-                     iteration, i)
+                     loop_count, model_start_idx, i)
 
+    results = sess.run(fetches, feed_dict)
+                         
     print('  new final loss is now  {}'.format(results['loss']))
 
     snapshot(results['approx'][0],
              results['approx'][0],
              opts, inputs, models, sess,
-             iteration, opts.full_iter)
+             loop_count, model_start_idx, opts.full_iter)
 
     if results['loss'] < prev_best_loss:
-        state.params[:] = results['params'][0]
-        state.approx[:] = results['gabor'][0]
-        state.con_loss[:] = results['con_losses']
+
+        state.params[:max_rowval] = results['params'][0,:max_rowval]
+        state.gabor[:max_rowval] = results['gabor'][0]
+        state.con_loss[:max_rowval] = results['con_losses'][0, :max_rowval]
         prev_best_loss = results['loss']
 
         if opts.output is not None:
             np.savetxt(opts.output,
-                       state.params[:min(iteration, opts.num_models)],
+                       state.params[:max_rowval],
                        fmt='%f', delimiter=',')
 
     print()
@@ -777,9 +817,10 @@ def full_optimize(opts, inputs, models, state, sess,
 # Optimize a bunch of randomly-initialized small ensembles in
 # parallel.
 
-def par_mini_optimize(opts, inputs, models, state, sess,
+def local_optimize(opts, inputs, models, state, sess,
                       cur_approx, cur_con_losses, cur_target,
-                      is_replace, model_idx):
+                      is_replace, model_idx, loop_count,
+                      model_start_idx, prev_best_loss):
 
     # Params have already been randomly initialized, but we
     # need to replace some of them here
@@ -788,106 +829,92 @@ def par_mini_optimize(opts, inputs, models, state, sess,
     if set_pvalues:
 
         # Get current randomly initialized values
-        pvalues = sess.run(models.par_mini.params)
+        pvalues = sess.run(models.local.params)
 
         if opts.lambda_err:
             # Do Boltzmann-style sampling of error for u,v
             pvalues[:, :, :2] = sample_weighted_error(opts, inputs,
-                                                      cur_target)
+                                                           cur_target)
 
-        if is_replace:
+        if is_replace and opts.copy_quantity:
+
             # Load in existing model values, slightly perturbed.
-            pvalues[0, :, :] = randomize(state.params[model_idx],
-                                         opts.rstdev)
+            rparams = randomize(state.params[model_idx], opts.rstdev,
+                                opts.copy_quantity)
+            
+            pvalues[:opts.copy_quantity] = rparams
 
         # Update tensor with data set above
-        models.par_mini.params.load(pvalues, sess)
-
-    fetches = dict(params=models.par_mini.params,
-                   train_op=models.par_mini.train_op,
-                   best_loss=models.par_mini.losses_min,
-                   best_params=models.par_mini.params_min)
+        models.local.params.load(pvalues, sess)
 
     feed_dict = {inputs.target_tensor: cur_target}
 
-    for i in range(opts.max_iter):
-        results = sess.run(fetches, feed_dict)
+    fetches = dict(loss=models.local.loss_min,
+                   con_loss=models.local.con_loss_min,
+                   approx=models.local.approx_min,
+                   gabor=models.local.gabor_min,
+                   params=models.local.params_min)
+        
+    for i in range(opts.local_iter):
+        results = sess.run(models.local.train_op, feed_dict)
+                         
+    results = sess.run(fetches, feed_dict)
 
-    best_loss = results['best_loss'] + cur_con_losses
-    best_params = results['best_params']
-
-    print('  best loss so far is', best_loss)
-
-    return best_loss, best_params
-
-######################################################################
-# Take the best-performing result from the parallel optimization
-# above and refine it.
-
-def one_mini_optimize(opts, inputs, models, state, sess,
-                      cur_approx, cur_con_losses, cur_target,
-                      is_replace, model_idx, best_params,
-                      iteration, prev_best_loss):
+    new_loss = results['loss'] + cur_con_losses
+    new_approx = results['approx']
+    new_gabor = results['gabor']
+    new_params = results['params']
+    new_con_loss = results['con_loss']
     
-    models.one_mini.params.load(best_params[None,:], sess)
-
-    fetches = dict(params=models.one_mini.params,
-                   con_loss_per_batch=models.one_mini.con_loss_per_batch,
-                   loss=models.one_mini.loss,
-                   train_op=models.one_mini.train_op,
-                   gabor=models.one_mini.gabor)
-
-    feed_dict = {inputs.target_tensor: cur_target}
-
-    for i in range(opts.refine):
-        results = sess.run(fetches, feed_dict)
-
-    new_loss = cur_con_losses + results['loss']
     print('  post-refine loss is', new_loss)
 
-    assert(results['params'].shape ==
-           (1, opts.mini_ensemble_size, 8))
+    assert(new_params.shape == (opts.mini_ensemble_size, 8))
 
-    assert(results['gabor'].shape ==
-           (1, opts.mini_ensemble_size) + inputs.input_image.shape)
+    assert(new_con_loss.shape == (opts.mini_ensemble_size,))
+
+    assert(new_gabor.shape == (opts.mini_ensemble_size,) + inputs.input_image.shape)
+
+    assert(new_approx.shape == inputs.input_image.shape)
     
-    assert(results['con_loss_per_batch'].shape ==
-           (opts.mini_ensemble_size,))
+    if opts.preview_size:
+        models.full.params.load(state.params[None,:,:], sess)
 
-    new_params = results['params'][0]
-    new_approx = results['gabor'][0]
-    new_con_loss = results['con_loss_per_batch']
+    snapshot(new_approx,
+             cur_approx + new_approx,
+             opts, inputs, models, sess,
+             loop_count, model_start_idx, '')
 
-    if (is_replace and
-        prev_best_loss is not None and
-        new_loss >= prev_best_loss):
 
-        print('  not better than', prev_best_loss, 'skipping update')
+    do_update = True
 
-    else:
+    if is_replace and new_loss > prev_best_loss:
+
+        rel_change = (prev_best_loss - new_loss) / prev_best_loss
+
+        if not opts.anneal_temp:
+            print('  not better than', prev_best_loss, 'skipping update')
+            do_update = False
+        else:
+            p_accept = np.exp(rel_change / opts.anneal_temp)
+            r = np.random.random()
+            do_update = (r < p_accept)
+            if do_update:
+                print('  accepting relative increase of {}'.format(-rel_change))
+            else:
+                print('  rejecting relative increase of {}'.format(-rel_change))
+
+    if do_update:
 
         if opts.output is not None:
             np.savetxt(opts.output,
-                       state.params[:min(iteration, opts.num_models)],
+                       state.params[:min(model_start_idx, opts.num_models)],
                        fmt='%f', delimiter=',')
 
-        prev_best_loss = new_loss
+            prev_best_loss = new_loss
 
         state.params[model_idx] = new_params
-        state.approx[model_idx] = new_approx
+        state.gabor[model_idx] = new_gabor
         state.con_loss[model_idx] = new_con_loss
-
-        cur_approx += state.approx[model_idx].sum(axis=0)
-
-        outfile = 'out{:04d}.png'.format(iteration+1)
-
-        if opts.preview_size:
-            models.full.params.load(state.params[None,:,:], sess)
-
-        snapshot(results['gabor'][0].sum(axis=0),
-                 cur_approx,
-                 opts, inputs, models, sess,
-                 iteration, None)
 
     print()
 
@@ -908,8 +935,7 @@ def main():
     state = setup_state(opts, inputs)
 
     prev_best_loss = None
-    iteration = 0
-    loop_count = 0
+    model_start_idx = 0
 
     ############################################################
     # Finalize the graph before doing anything with a tf.Session() -
@@ -932,19 +958,33 @@ def main():
         # Initialize all global vars (including optimizer-internal vars)
         sess.run(ginit)
 
+        # Get start time
+        start_time = datetime.now()
+        
         # Parse input file
         if opts.input is not None:
             
             if not os.path.isfile(opts.input):
+                
                 print("warning: can't load weights from", opts.input)
+                
             else:
-                prev_best_loss, iteration = load_params(opts, inputs,
-                                                        models, state,
-                                                        sess)
 
-        # Get start time
-        start_time = datetime.now()
+                prev_best_loss, model_start_idx = load_params(opts, inputs,
+                                                              models, state,
+                                                              sess)
 
+                loop_count = -1
+
+                if opts.time_limit != 0 and opts.total_iterations != 0:
+                    prev_best_loss = full_optimize(opts, inputs, models, state,
+                                                   sess,
+                                                   loop_count,
+                                                   model_start_idx,
+                                                   prev_best_loss)
+                    
+        loop_count = 0
+                    
         # Optimization loop (hit Ctrl+C to quit)
         while True:
 
@@ -965,15 +1005,10 @@ def main():
             sess.run(ginit)
 
             # Establish starting index for models and whether to replace or not
-            model_start_idx = iteration * opts.mini_ensemble_size
             is_replace = (model_start_idx >= opts.num_models)
 
-            # See if it's time to  do a full optimization
-            if (is_replace and model_start_idx % opts.full_every == 0):
-                prev_best_loss = full_optimize(opts, inputs, models, state,
-                                               sess, prev_best_loss, iteration)
-
-
+            print('at loop iteration {}, '.format(loop_count+1), end='')
+            
             # Figure out which model(s) to replace or newly train
             if is_replace:
                 
@@ -994,7 +1029,7 @@ def main():
 
             # Get the current approximation (sum of all Gabor functions
             # from all models except the current ones)
-            cur_approx = state.approx[rest_idx].sum(axis=0)
+            cur_approx = state.gabor[rest_idx].sum(axis=0)
  
             # The function to fit is the difference betw. input image
             # and current approximation so far.
@@ -1006,23 +1041,27 @@ def main():
 
             # Do a big parallel optimization for a bunch of random
             # model initializations
-            best_loss, best_params = par_mini_optimize(opts, inputs, models,
-                                                       state, sess,
-                                                       cur_approx, cur_con_losses,
-                                                       cur_target, is_replace,
-                                                       model_idx)
+            prev_best_loss = local_optimize(opts, inputs, models,
+                                            state, sess,
+                                            cur_approx, cur_con_losses,
+                                            cur_target,
+                                            is_replace, model_idx, 
+                                            loop_count,
+                                            model_start_idx,
+                                            prev_best_loss)
 
-            # Take the best result of the mini-optimization above and
-            # refine it.
-            prev_best_loss = one_mini_optimize(opts, inputs, models,
-                                               state, sess,
-                                               cur_approx, cur_con_losses,
-                                               cur_target, is_replace,
-                                               model_idx, best_params,
-                                               iteration, prev_best_loss)
+            # Done with this mini-ensemble
+            model_start_idx += opts.mini_ensemble_size
+            
+            # See if it's time to  do a full optimization
+            if (loop_count+1) % opts.full_every == 0:
+                prev_best_loss = full_optimize(opts, inputs, models, state,
+                                               sess,
+                                               loop_count,
+                                               model_start_idx,
+                                               prev_best_loss)
 
-            # Done this loop
-            iteration += 1
+            # Finished with this loop iteration
             loop_count += 1
             
 if __name__ == '__main__':
