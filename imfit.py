@@ -6,6 +6,8 @@ import tensorflow as tf
 import numpy as np
 from PIL import Image
 
+COLORMAP = None
+
 ModelsTuple = namedtuple('ModelsTuple',
                          'full, local, preview')
 
@@ -81,7 +83,7 @@ def get_options():
 
     parser.add_argument('-p', '--preview-size', type=int, metavar='N',
                         default=0,
-                        help='size of preview image (<0 to disable)')
+                        help='size of large preview image (0 to disable)')
     
     parser.add_argument('-w', '--weights', type=argparse.FileType('r'),
                         metavar='WEIGHTS.png',
@@ -165,9 +167,7 @@ def get_options():
     else:
         opts.copy_quantity = int(round(opts.copy_quantity * opts.num_local))
 
-    if opts.preview_size == 0:
-        opts.preview_size = 4*opts.max_size
-    elif opts.preview_size < 0:
+    if opts.preview_size < 0:
         opts.preview_size = 0
 
     assert opts.num_models % opts.mini_ensemble_size == 0
@@ -354,9 +354,9 @@ class GaborModel(object):
         # Pair-wise constraints on l, s, t:
 
         # f x m x 1
-        l = self.params[:,:,GABOR_PARAM_L]
-        s = self.params[:,:,GABOR_PARAM_S]
-        t = self.params[:,:,GABOR_PARAM_T]
+        l = self.cparams[:,:,GABOR_PARAM_L]
+        s = self.cparams[:,:,GABOR_PARAM_S]
+        t = self.cparams[:,:,GABOR_PARAM_T]
                 
         pairwise_constraints = [
             s - l/32,
@@ -412,26 +412,19 @@ class GaborModel(object):
 ######################################################################
 # Rescale image to map given bounds to [0,255] uint8
 
-def rescale(idata, imin, imax):
+def rescale(idata, imin, imax, colormap=None):
 
     assert imax > imin
     img = (idata - imin) / (imax - imin)
     img = np.clip(img, 0, 1)
     img = (img*255).astype(np.uint8)
 
-    return img
-
-######################################################################
-# Apply padding to right hand side of image
-
-def pad_right(img, width):
-
-    if img.shape[1] >= width:
-        return img
+    if colormap is None:
+        img = np.dstack( (img, img, img) )
     else:
-        out_shape = (img.shape[0], width-img.shape[1])
-        padding = np.zeros(out_shape, dtype=img.dtype)
-        return np.hstack(( img, padding ))
+        img = colormap[img]
+
+    return img
 
 ######################################################################
 # Save a snapshot of the current state to a PNG file
@@ -449,42 +442,52 @@ def snapshot(cur_gabor, cur_approx,
     else:
         outfile = '{}{:04d}{}.png'.format(
             opts.snapshot_prefix, loop_count+1, full_iteration)
+
+    if cur_gabor is None:
+        cur_gabor = np.zeros_like(cur_approx)
         
     cur_abserr = np.abs(cur_approx - inputs.input_image)
     cur_abserr = cur_abserr * inputs.weight_image
+    #cur_abserr = 1 - np.exp( -5*cur_abserr )
+    cur_abserr = np.power(cur_abserr, 0.5)
 
-    out_img = np.hstack(( rescale(inputs.input_image, -1, 1),
-                          rescale(cur_approx, -1, 1),
-                          rescale(cur_gabor, -1, 1),
-                          rescale(cur_abserr, 0, 1.0) ))
+    global COLORMAP
+    
+    if COLORMAP is None:
+        COLORMAP = np.genfromtxt('magma.txt',
+                                 delimiter=',',
+                                 dtype=np.float32)
+        assert( COLORMAP.shape == (256, 3) )
+        COLORMAP = (np.clip(COLORMAP, 0, 1)*255).astype(np.uint8)
 
-    if opts.preview_size:
+    if not opts.preview_size:
+        
+        out_img = np.hstack(( rescale(inputs.input_image, -1, 1),
+                              rescale(cur_approx, -1, 1),
+                              rescale(cur_gabor, -1, 1),
+                              rescale(cur_abserr, 0, 1.0, COLORMAP) ))
 
+    else:
+        
         max_rowval = min(model_start_idx, opts.num_models)
 
         feed_dict = { inputs.max_row: max_rowval }
 
-        pparams = sess.run(models.preview.params)
         preview_image = sess.run(models.preview.approx, feed_dict)[0]
-        pgabors = sess.run(models.preview.gabor, feed_dict).sum(axis=(0,2,3))
-        
-        if np.any(np.isnan(preview_image)):
-            print(preview_image)
-            print(pparams[:max_rowval])
-            print('# params:', np.isnan(pparams[:max_rowval]).sum())
-            print(np.isnan(pgabors))
-            assert not np.any(np.isnan(preview_image))
-        assert not np.all(preview_image == 0)
+        ph, pw = preview_image.shape
         preview_image = rescale(preview_image, -1, 1)
 
-        max_width = max(preview_image.shape[1], out_img.shape[1])
+        err_image = rescale(cur_abserr, 0, 1.0, COLORMAP)
+        err_image = Image.fromarray(err_image, 'RGB')
+
+        err_image = err_image.resize( (pw, ph),
+                                      resample=Image.NEAREST )
         
-        preview_image = pad_right(preview_image, max_width)
-        
-        out_img = pad_right(out_img, max_width)
-        out_img = np.vstack( (out_img, preview_image) )
+        err_image = np.array(err_image)
+
+        out_img = np.hstack((preview_image, err_image))
     
-    out_img = Image.fromarray(out_img, 'L')
+    out_img = Image.fromarray(out_img, 'RGB')
 
     out_img.save(outfile)
 
@@ -613,8 +616,12 @@ def setup_models(opts, inputs):
 
 def load_params(opts, inputs, models, state, sess):
 
-    iparams = np.genfromtxt(opts.input, dtype=np.float32, delimiter=',')
-    nparams = len(iparams)
+    if opts.input is not None:
+        iparams = np.genfromtxt(opts.input, dtype=np.float32, delimiter=',')
+        nparams = len(iparams)
+    else:
+        iparams = np.empty((0, GABOR_NUM_PARAMS), dtype=np.float32)
+        nparams = 0 
 
     print('loaded {} models from {}'.format(
         nparams, opts.input))
@@ -650,12 +657,13 @@ def load_params(opts, inputs, models, state, sess):
 
     prev_best_loss = results['err_loss'] + state.con_loss[:nparams].sum()
 
-    cur_gabor = results['approx'][0]
+    cur_approx = results['approx'][0]
 
     if opts.preview_size:
         models.full.params.load(state.params[None,:])
     
-    snapshot(cur_gabor, cur_gabor, opts, inputs, models, sess, -1, nparams, '')
+    snapshot(None, cur_approx,
+             opts, inputs, models, sess, -1, nparams, '')
     
     print('initial loss is {}'.format(prev_best_loss))
     print()
@@ -731,7 +739,7 @@ def full_optimize(opts, inputs, models, state, sess,
             print('  loss at iter {:6d} is {}'.format(
                 i+1, results['loss']))
 
-            snapshot(results['approx'][0],
+            snapshot(None,
                      results['approx'][0],
                      opts, inputs, models, sess,
                      loop_count, model_start_idx, i)
@@ -740,7 +748,7 @@ def full_optimize(opts, inputs, models, state, sess,
                          
     print('  new final loss is now  {}'.format(results['loss']))
 
-    snapshot(results['approx'][0],
+    snapshot(None,
              results['approx'][0],
              opts, inputs, models, sess,
              loop_count, model_start_idx, opts.full_iter-1)
@@ -905,11 +913,11 @@ def main():
         start_time = datetime.now()
         
         # Parse input file
+        prev_best_loss, model_start_idx = load_params(opts, inputs,
+                                                      models, state,
+                                                      sess)
+
         if opts.input is not None:
-            
-            prev_best_loss, model_start_idx = load_params(opts, inputs,
-                                                          models, state,
-                                                          sess)
 
             loop_count = -1
 
@@ -925,9 +933,9 @@ def main():
                 if opts.output is not None:
                     np.savetxt(opts.output, state.params,
                                fmt='%f', delimiter=',')
-
-            rollback_state = copy_state(state)
-            rollback_loss = prev_best_loss
+                    
+        rollback_state = copy_state(state)
+        rollback_loss = prev_best_loss
                     
         loop_count = 0
                     
