@@ -342,7 +342,7 @@ class GaborModel(object):
 
         box_constraints = []
 
-        for i  in range(GABOR_PARAM_P, GABOR_NUM_PARAMS):
+        for i in range(GABOR_PARAM_L, GABOR_NUM_PARAMS):
             lo, hi = GABOR_RANGE[i]
             var = self.cparams[:,:,i]
             box_constraints.append( var - lo )
@@ -619,10 +619,11 @@ def load_params(opts, inputs, models, state, sess):
     print('loaded {} models from {}'.format(
         nparams, opts.input))
 
-    for i, pname in enumerate('uvrpltsh'):
-        p = iparams[:,i]
-        print('param {} has min {} and max {}'.format(
-            pname, p.min(), p.max()))
+    if nparams:
+        for i, pname in enumerate('uvrpltsh'):
+            p = iparams[:,i]
+            print('param {} has min {} and max {}'.format(
+                pname, p.min(), p.max()))
         
 
     nparams -= nparams % opts.mini_ensemble_size
