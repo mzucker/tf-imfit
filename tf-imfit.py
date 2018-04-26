@@ -269,25 +269,26 @@ class GaborModel(object):
         gmin[:,:,:GABOR_PARAM_L] = -np.inf
         gmax[:,:,:GABOR_PARAM_L] =  np.inf
 
-        self.cparams = tf.clip_by_value(self.params[:,:max_row],
+        # f x m x 8
+        self.cparams = tf.clip_by_value(self.params[:,:max_row,:],
                                         gmin, gmax,
                                         name='cparams')
 
         ############################################################
         # Now compute the Gabor function for each fit/model
         
-        # f x m x 8 x 1 x 1
-        params_bcast = self.cparams[:,:,:,None,None]
+        # f x 1 x 1 x m x 8
+        params_bcast = self.cparams[:,None,None,:,:]
 
-        # f x m x 1 x 1
-        u = params_bcast[:,:,GABOR_PARAM_U]
-        v = params_bcast[:,:,GABOR_PARAM_V]
-        r = params_bcast[:,:,GABOR_PARAM_R]
-        p = params_bcast[:,:,GABOR_PARAM_P]
-        l = params_bcast[:,:,GABOR_PARAM_L]
-        s = params_bcast[:,:,GABOR_PARAM_S]
-        t = params_bcast[:,:,GABOR_PARAM_T]
-        h = params_bcast[:,:,GABOR_PARAM_H]
+        # f x 1 x 1 x m
+        u = params_bcast[:,:,:,:,GABOR_PARAM_U]
+        v = params_bcast[:,:,:,:,GABOR_PARAM_V]
+        r = params_bcast[:,:,:,:,GABOR_PARAM_R]
+        p = params_bcast[:,:,:,:,GABOR_PARAM_P]
+        l = params_bcast[:,:,:,:,GABOR_PARAM_L]
+        s = params_bcast[:,:,:,:,GABOR_PARAM_S]
+        t = params_bcast[:,:,:,:,GABOR_PARAM_T]
+        h = params_bcast[:,:,:,:,GABOR_PARAM_H]
 
         cr = tf.cos(r)
         sr = tf.sin(r)
@@ -297,13 +298,13 @@ class GaborModel(object):
         s2 = s*s
         t2 = t*t
 
-        # f x m x 1 x w
+        # f x 1 x w x m
         xp = x-u
 
-        # f x m x h x 1
+        # f x h x 1 x m
         yp = y-v
 
-        # f x m x h x w
+        # f x h x w x m
         b1 =  cr*xp + sr*yp
         b2 = -sr*xp + cr*yp
 
@@ -321,7 +322,7 @@ class GaborModel(object):
         # Compute the ensemble sum of all models for each fit        
         
         # f x h x w
-        self.approx = tf.reduce_sum(self.gabor, axis=1, name='approx')
+        self.approx = tf.reduce_sum(self.gabor, axis=3, name='approx')
 
         ############################################################
         # Everything below here is for optimizing, if we just want
@@ -465,9 +466,10 @@ def snapshot(cur_gabor, cur_approx,
         max_rowval = min(model_start_idx, opts.num_models)
 
         feed_dict = { inputs.max_row: max_rowval }
-
         preview_image = sess.run(models.preview.approx, feed_dict)[0]
+
         ph, pw = preview_image.shape
+            
         preview_image = rescale(preview_image, -1, 1)
 
         err_image = rescale(cur_abserr, 0, 1.0, COLORMAP)
@@ -515,9 +517,9 @@ def normalized_grid(shape):
     x = (np.arange(w, dtype=np.float32) - 0.5*(w) + 0.5) * px
     y = (np.arange(h, dtype=np.float32) - 0.5*(h) + 0.5) * px
 
-    # shape broadcastable to 1 x 1 x h x w
-    x = x.reshape(1, 1,  1, -1)
-    y = y.reshape(1, 1, -1,  1)
+    # shape broadcastable to 1 x h x w x 1
+    x = x.reshape(1,  1, -1, 1)
+    y = y.reshape(1, -1,  1, 1)
 
     return px, x, y
 
@@ -619,13 +621,6 @@ def load_params(opts, inputs, models, state, sess):
     print('loaded {} models from {}'.format(
         nparams, opts.input))
 
-    if nparams:
-        for i, pname in enumerate('uvrpltsh'):
-            p = iparams[:,i]
-            print('param {} has min {} and max {}'.format(
-                pname, p.min(), p.max()))
-        
-
     nparams -= nparams % opts.mini_ensemble_size
     nparams = min(nparams, opts.num_models)
 
@@ -652,16 +647,13 @@ def load_params(opts, inputs, models, state, sess):
 
     results = sess.run(fetches, feed_dict)
 
-    state.gabor[:nparams] = results['gabor'][0, :nparams]
+    state.gabor[:,:,:nparams] = results['gabor'][0, :, :, :nparams]
     state.con_loss[:nparams] = results['con_losses'][0, :nparams]
-
-    prev_best_loss = results['err_loss'] + state.con_loss[:nparams].sum()
 
     cur_approx = results['approx'][0]
 
-    print('cur_approx has min {} max {} mean {} std {}'.format(
-        cur_approx.min(), cur_approx.max(), cur_approx.mean(), cur_approx.std()))
-
+    prev_best_loss = results['err_loss'] + state.con_loss[:nparams].sum()
+        
     if opts.preview_size:
         models.full.params.load(state.params[None,:])
     
@@ -686,7 +678,7 @@ def setup_state(opts, inputs):
         params=np.zeros((opts.num_models, GABOR_NUM_PARAMS),
                         dtype=np.float32),
         
-        gabor=np.zeros((opts.num_models,) + inputs.input_image.shape,
+        gabor=np.zeros(inputs.input_image.shape + (opts.num_models,),
                        dtype=np.float32),
 
         con_loss=np.zeros(opts.num_models, dtype=np.float32)
@@ -759,7 +751,7 @@ def full_optimize(opts, inputs, models, state, sess,
     if results['loss'] < prev_best_loss:
 
         state.params[:max_rowval] = results['params'][0]
-        state.gabor[:max_rowval] = results['gabor'][0]
+        state.gabor[:,:,:max_rowval] = results['gabor'][0]
         state.con_loss[:max_rowval] = results['con_losses'][0]
         prev_best_loss = results['loss']
 
@@ -825,7 +817,7 @@ def local_optimize(opts, inputs, models, state, sess,
     assert(new_con_loss.shape == (opts.mini_ensemble_size,))
 
     assert(new_gabor.shape ==
-           (opts.mini_ensemble_size,) + inputs.input_image.shape)
+           inputs.input_image.shape + (opts.mini_ensemble_size,))
 
     assert(new_approx.shape == inputs.input_image.shape)
     
@@ -863,7 +855,7 @@ def local_optimize(opts, inputs, models, state, sess,
         prev_best_loss = new_loss
 
         state.params[model_idx] = new_params
-        state.gabor[model_idx] = new_gabor
+        state.gabor[:,:,model_idx] = new_gabor
         state.con_loss[model_idx] = new_con_loss
 
     print()
@@ -985,7 +977,7 @@ def main():
                 
             # Get the current approximation (sum of all Gabor functions
             # from all models except the current ones)
-            cur_approx = state.gabor[rest_idx].sum(axis=0)
+            cur_approx = state.gabor[:,:,rest_idx].sum(axis=2)
  
             # The function to fit is the difference betw. input image
             # and current approximation so far.
