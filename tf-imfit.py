@@ -345,10 +345,8 @@ class GaborModel(object):
         for i  in range(GABOR_PARAM_P, GABOR_NUM_PARAMS):
             lo, hi = GABOR_RANGE[i]
             var = self.cparams[:,:,i]
-            if lo != -np.pi:
-                box_constraints.append( var - lo )
-            if hi != np.pi:
-                box_constraints.append( hi - var )
+            box_constraints.append( var - lo )
+            box_constraints.append( hi - var )
         
         # Pair-wise constraints on l, s, t:
 
