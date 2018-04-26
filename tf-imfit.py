@@ -328,17 +328,6 @@ class GaborModel(object):
         # All constraint losses are of the form min(c, 0)**2, where c
         # is an individual constraint function. So we only get a
         # penalty if the constraint function c is less than zero.
-
-        # Box constraints on l,t,s,h. Note we don't actually
-        # enforce bounds on u,v,r,p
-
-        box_constraints = []
-
-        for i in range(GABOR_PARAM_L, GABOR_NUM_PARAMS):
-            lo, hi = GABOR_RANGE[i]
-            var = self.cparams[:,:,i]
-            box_constraints.append( var - lo )
-            box_constraints.append( hi - var )
         
         # Pair-wise constraints on l, s, t:
 
@@ -355,8 +344,8 @@ class GaborModel(object):
         ]
                 
         # f x m x k
-        self.constraints = tf.stack( box_constraints + pairwise_constraints,
-                                    axis=2, name='constraints' )
+        self.constraints = tf.stack( pairwise_constraints,
+                                     axis=2, name='constraints' )
 
         # f x m x k
         con_sqr = tf.minimum(self.constraints, 0)**2
