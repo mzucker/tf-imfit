@@ -340,7 +340,6 @@ class GaborModel(object):
         # Box constraints on l,t,s,h. Note we don't actually
         # enforce bounds on u,v,r,p
 
-
         box_constraints = []
 
         for i  in range(GABOR_PARAM_P, GABOR_NUM_PARAMS):
@@ -868,7 +867,6 @@ def local_optimize(opts, inputs, models, state, sess,
         state.gabor[model_idx] = new_gabor
         state.con_loss[model_idx] = new_con_loss
 
-
     print()
 
     return prev_best_loss
@@ -1044,7 +1042,7 @@ def main():
 ######################################################################
 
 # from https://github.com/BIDS/colormap/blob/master/colormaps.py
-# licensed
+# licensed CC0
 _magma_data = [[0.001462, 0.000466, 0.013866],
                [0.002258, 0.001295, 0.018331],
                [0.003279, 0.002305, 0.023708],
