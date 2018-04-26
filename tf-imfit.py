@@ -277,18 +277,9 @@ class GaborModel(object):
         ############################################################
         # Now compute the Gabor function for each fit/model
         
-        # f x 1 x 1 x m x 8
-        params_bcast = self.cparams[:,None,None,:,:]
-
-        # f x 1 x 1 x m
-        u = params_bcast[:,:,:,:,GABOR_PARAM_U]
-        v = params_bcast[:,:,:,:,GABOR_PARAM_V]
-        r = params_bcast[:,:,:,:,GABOR_PARAM_R]
-        p = params_bcast[:,:,:,:,GABOR_PARAM_P]
-        l = params_bcast[:,:,:,:,GABOR_PARAM_L]
-        s = params_bcast[:,:,:,:,GABOR_PARAM_S]
-        t = params_bcast[:,:,:,:,GABOR_PARAM_T]
-        h = params_bcast[:,:,:,:,GABOR_PARAM_H]
+        # f x 1 x 1 x m 
+        u,v,r,p,l,t,s,h = [ self.cparams[:,None,None,:,i] 
+                            for i in range(GABOR_NUM_PARAMS) ]
 
         cr = tf.cos(r)
         sr = tf.sin(r)
@@ -517,10 +508,6 @@ def normalized_grid(shape):
     x = (np.arange(w, dtype=np.float32) - 0.5*(w) + 0.5) * px
     y = (np.arange(h, dtype=np.float32) - 0.5*(h) + 0.5) * px
 
-    # shape broadcastable to 1 x h x w x 1
-    x = x.reshape(1,  1, -1, 1)
-    y = y.reshape(1, -1,  1, 1)
-
     return px, x, y
 
 ######################################################################
@@ -563,8 +550,8 @@ def setup_models(opts, inputs):
     
     weight_tensor = tf.constant(inputs.weight_image)
 
-    x_tensor = tf.constant(inputs.x)
-    y_tensor = tf.constant(inputs.y)
+    x_tensor = tf.constant(inputs.x.reshape(1,1,-1,1))
+    y_tensor = tf.constant(inputs.y.reshape(1,-1,1,1))
 
     with tf.variable_scope('full'):
 
@@ -593,7 +580,8 @@ def setup_models(opts, inputs):
         _, x_preview, y_preview = normalized_grid(preview_shape)
         
         with tf.variable_scope('preview'):
-            preview = GaborModel(x_preview, y_preview,
+            preview = GaborModel(x_preview.reshape(1,1,-1,1),
+                                 y_preview.reshape(1,-1,1,1),
                                  (1, opts.num_models),
                                  weight_tensor,
                                  target=None,
