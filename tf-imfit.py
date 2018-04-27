@@ -217,11 +217,6 @@ def open_grayscale(handle, max_size):
     return image
 
 ######################################################################
-
-def mix(a, b, u):
-    return a + u*(b-a)
-
-######################################################################
 # Encapsulate the tensorflow objects we need to run our fit.
 # Note we will create several of these (see main function below).
 
