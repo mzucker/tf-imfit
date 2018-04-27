@@ -226,10 +226,10 @@ def open_grayscale(handle, max_size):
 
 class GaborModel(object):
  
-    # The Gabor function tensor we define will be f x h x w x m
-    # where f = num_parallel is the number independent fits,
+    # The Gabor function tensor we define will be n x h x w x c
+    # where n = num_parallel is the number independent fits,
     # h x w is the image size,
-    # and m = num_models is the number of models per ensemble
+    # and c = ensemble_size is the number of Gabor functions per fit
     def __init__(self, 
                  num_parallel, ensemble_size,
                  x, y, weight, target,
@@ -258,7 +258,7 @@ class GaborModel(object):
                                                             maxval=gmax,
                                                             dtype=tf.float32)
 
-            # f x m x 8
+            # n x c x 8
             self.params = tf.get_variable(
                 'params',
                 shape=(num_parallel, ensemble_size, GABOR_NUM_PARAMS),
@@ -268,7 +268,7 @@ class GaborModel(object):
         gmin[:,:,:GABOR_PARAM_L] = -np.inf
         gmax[:,:,:GABOR_PARAM_L] =  np.inf
 
-        # f x m x 8
+        # n x c x 8
         self.cparams = tf.clip_by_value(self.params[:,:max_row,:],
                                         gmin, gmax,
                                         name='cparams')
@@ -276,7 +276,7 @@ class GaborModel(object):
         ############################################################
         # Now compute the Gabor function for each fit/model
         
-        # f x 1 x 1 x m 
+        # n x 1 x 1 x c 
         u,v,r,p,l,t,s,h = [ self.cparams[:,None,None,:,i] 
                             for i in range(GABOR_NUM_PARAMS) ]
 
@@ -288,13 +288,13 @@ class GaborModel(object):
         s2 = s*s
         t2 = t*t
 
-        # f x 1 x w x m
+        # n x 1 x w x c
         xp = x-u
 
-        # f x h x 1 x m
+        # n x h x 1 x c
         yp = y-v
 
-        # f x h x w x m
+        # n x h x w x c
         b1 =  cr*xp + sr*yp
         b2 = -sr*xp + cr*yp
 
@@ -311,7 +311,7 @@ class GaborModel(object):
         ############################################################
         # Compute the ensemble sum of all models for each fit        
         
-        # f x h x w
+        # n x h x w
         self.approx = tf.reduce_sum(self.gabor, axis=3, name='approx')
 
         ############################################################
@@ -330,7 +330,7 @@ class GaborModel(object):
         
         # Pair-wise constraints on l, s, t:
 
-        # f x m x 1
+        # n x c x 1
         l = self.cparams[:,:,GABOR_PARAM_L]
         s = self.cparams[:,:,GABOR_PARAM_S]
         t = self.cparams[:,:,GABOR_PARAM_T]
@@ -342,37 +342,37 @@ class GaborModel(object):
             8*s - t
         ]
                 
-        # f x m x k
+        # n x c x k
         self.constraints = tf.stack( pairwise_constraints,
                                      axis=2, name='constraints' )
 
-        # f x m x k
+        # n x c x k
         con_sqr = tf.minimum(self.constraints, 0)**2
 
-        # f x m
+        # n x c
         self.con_losses = tf.reduce_sum(con_sqr, axis=2, name='con_losses')
 
-        # f (sum across mini-batch)
+        # n (sum across mini-batch)
         self.con_loss_per_fit = tf.reduce_sum(self.con_losses, axis=1,
                                               name='con_loss_per_fit')
 
         ############################################################
         # Compute loss for approximation error
         
-        # f x h x w
+        # n x h x w
         self.err = tf.multiply((target - self.approx),
                                 weight, name='err')
 
         err_sqr = 0.5*self.err**2
 
-        # f (average across h/w)
+        # n (average across h/w)
         self.err_loss_per_fit = tf.reduce_mean(err_sqr, axis=(1,2),
                                                name='err_loss_per_fit')
 
         ############################################################
         # Compute various sums/means of above losses:
 
-        # f
+        # n
         self.loss_per_fit = tf.add(self.con_loss_per_fit,
                                    self.err_loss_per_fit,
                                    name='loss_per_fit')
