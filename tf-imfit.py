@@ -225,18 +225,18 @@ def open_grayscale(handle, max_size):
 # Note we will create several of these (see main function below).
 
 class GaborModel(object):
-
-    def __init__(self, x, y, minishape, weight,
-                 target,
+ 
+    # The Gabor function tensor we define will be f x h x w x m
+    # where f = num_parallel is the number independent fits,
+    # h x w is the image size,
+    # and m = num_models is the number of models per ensemble
+    def __init__(self, 
+                 num_parallel, ensemble_size,
+                 x, y, weight, target,
                  learning_rate=0.0001,
                  params=None,
                  initializer=None,
                  max_row=None):
-
-        # The Gabor function tensor we define will be f x m x h x w
-        # where f is the number of parallel, independent fits being computed,
-        # and m is the number of models per ensemble
-        num_parallel, ensemble_size = minishape
 
         # Allow evaluating less than ensemble_size models (i.e. while
         # building up full model).
@@ -539,20 +539,18 @@ def setup_models(opts, inputs):
 
     with tf.variable_scope('full'):
 
-        full = GaborModel(x_tensor, y_tensor,
-                          (1, opts.num_models),
-                          weight_tensor,
-                          inputs.target_tensor,
+        full = GaborModel(1, opts.num_models,
+                          x_tensor, y_tensor,
+                          weight_tensor, inputs.target_tensor,
                           learning_rate=opts.full_learning_rate,
                           max_row = inputs.max_row,
                           initializer=tf.zeros_initializer())
     
     with tf.variable_scope('local'):
         
-        local = GaborModel(x_tensor, y_tensor,
-                           (opts.num_local, opts.mini_ensemble_size),
-                           weight_tensor,
-                           inputs.target_tensor,
+        local = GaborModel(opts.num_local, opts.mini_ensemble_size,
+                           x_tensor, y_tensor,
+                           weight_tensor, inputs.target_tensor,
                            learning_rate=opts.local_learning_rate)
         
 
@@ -564,11 +562,10 @@ def setup_models(opts, inputs):
         _, x_preview, y_preview = normalized_grid(preview_shape)
         
         with tf.variable_scope('preview'):
-            preview = GaborModel(x_preview.reshape(1,1,-1,1),
+            preview = GaborModel(1, opts.num_models,
+                                 x_preview.reshape(1,1,-1,1),
                                  y_preview.reshape(1,-1,1,1),
-                                 (1, opts.num_models),
-                                 weight_tensor,
-                                 target=None,
+                                 weight_tensor, target=None,
                                  max_row=inputs.max_row,
                                  params=full.params)
 
