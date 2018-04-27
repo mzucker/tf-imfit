@@ -421,8 +421,7 @@ def snapshot(cur_gabor, cur_approx,
         
     cur_abserr = np.abs(cur_approx - inputs.input_image)
     cur_abserr = cur_abserr * inputs.weight_image
-    #cur_abserr = 1 - np.exp( -5*cur_abserr )
-    cur_abserr = np.power(cur_abserr, 0.5)
+    cur_abserr = np.power(cur_abserr, 0.5) # boost low end to aid visualization
 
     global COLORMAP
     
@@ -449,10 +448,7 @@ def snapshot(cur_gabor, cur_approx,
 
         err_image = rescale(cur_abserr, 0, 1.0, COLORMAP)
         err_image = Image.fromarray(err_image, 'RGB')
-
-        err_image = err_image.resize( (pw, ph),
-                                      resample=Image.NEAREST )
-        
+        err_image = err_image.resize((pw, ph), resample=Image.NEAREST)
         err_image = np.array(err_image)
 
         out_img = np.hstack((preview_image, err_image))
@@ -990,7 +986,8 @@ def main():
                     print('current loss of {} is best so far!\n'.format(
                         rollback_loss))
                 else:
-                    print('cur. loss of {} is not better than prev. {}, rolling back!!!\n'.format(
+                    print('cur. loss of {} is not better than prev. {}, '
+                          'rolling back!!!\n'.format(
                         prev_best_loss, rollback_loss))
                     prev_best_loss = rollback_loss
                     state = copy_state(rollback_state)
@@ -1262,8 +1259,6 @@ _magma_data = [[0.001462, 0.000466, 0.013866],
                [0.987691, 0.977154, 0.734536],
                [0.987387, 0.984288, 0.742002],
                [0.987053, 0.991438, 0.749504]]    
-
-######################################################################
 
 def get_colormap():
     return (np.array(_magma_data)*255).astype(np.uint8)
