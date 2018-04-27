@@ -15,7 +15,8 @@ vary due to hardware differences.
 If you just want to check the accuracy of an existing fit or visualize
 its output, you can run something like:
 
-    python ./tf-imfit.py -w images/zz_rect_weights.png images/zz_rect.png -s256 -i params/zz_rect_weighted_256px.txt -p512 -T 0
+    python ./tf-imfit.py -w images/zz_rect_weights.png images/zz_rect.png \
+           -s256 -i params/zz_rect_weighted_256px.txt -p512 -T 0
     
 Although you will want a fancy GPU to do the error minimization,
 visualization/verification like the command above should run in
