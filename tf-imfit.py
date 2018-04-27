@@ -124,8 +124,10 @@ def get_options():
                         help='maximum # of iterations per local fit',
                         default=100)
     
-    parser.add_argument('-F', '--full-every', type=int, metavar='N', default=32,
-                        help='perform joint optimization after every N outer loops')
+    parser.add_argument('-F', '--full-every', type=int, metavar='N',
+                        default=32,
+                        help='perform joint optimization '
+                        'after every N outer loops')
 
     parser.add_argument('-f', '--full-iter', type=int, metavar='N',
                         help='maximum # of iterations for joint optimization',
@@ -145,7 +147,8 @@ def get_options():
 
     parser.add_argument('-c', '--copy-quantity', type=float,
                         metavar='C',
-                        help='number or fraction of re-fits to initialize with cur. model',
+                        help='number or fraction of re-fits'
+                        'to initialize with cur. model',
                         default=0.5)
     
     parser.add_argument('-a', '--anneal-temp', type=float, metavar='T',
@@ -153,9 +156,10 @@ def get_options():
                         default=0.08)
         
     parser.add_argument('-S', '--label-snapshot', action='store_true',
-                        help='individually label snapshots (good for anim. gif)')
+                        help='individually label snapshots')
  
-    parser.add_argument('-x', '--snapshot-prefix', type=str, metavar='BASENAME',
+    parser.add_argument('-x', '--snapshot-prefix', type=str,
+                        metavar='BASENAME',
                         help='prefix for snapshots', default='out')
   
     opts = parser.parse_args()
