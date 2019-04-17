@@ -20,22 +20,22 @@ StateTuple = namedtuple('StateTuple', 'params, gabor, con_loss')
 ######################################################################
 # Indexes of Gabor function parameters
 
-GABOR_PARAM_U = 0 # [-1, 1]
-GABOR_PARAM_V = 1 # [-1, 1]
-GABOR_PARAM_R = 2 # [0, 2*pi]
-GABOR_PARAM_P = 3 # [0, 2*pi]
-GABOR_PARAM_L = 4 # [2.5*px, 4]
-GABOR_PARAM_T = 5 # [px, 4]
-GABOR_PARAM_S = 6 # [px, 2]
-GABOR_PARAM_H = 7 # [0, 2]
+GABOR_PARAM_U = 0 
+GABOR_PARAM_V = 1 
+GABOR_PARAM_R = 2 
+GABOR_PARAM_P = 3 
+GABOR_PARAM_L = 4 
+GABOR_PARAM_T = 5 
+GABOR_PARAM_S = 6 
+GABOR_PARAM_H = 7 
 
 GABOR_NUM_PARAMS = 8
 
 GABOR_RANGE = np.array([
-    [ -1, 1 ],
-    [ -1, 1 ],
-    [ -np.pi, np.pi ],
-    [ -np.pi, np.pi ],
+    [ -1, 1 ],         # not clipped at runtime
+    [ -1, 1 ],         # not clipped at runtime
+    [ -np.pi, np.pi ], # not clipped at runtime
+    [ -np.pi, np.pi ], # not clipped at runtime
     [ 0, 4 ],
     [ 0, 4 ],
     [ 0, 2 ],
